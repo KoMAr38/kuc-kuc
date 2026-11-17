@@ -44,6 +44,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "headsup_ok": "Najava za sutra je preneta. {name} kaže da je dobro.",
         "headsup_missed": "Najava za sutra nije preneta: {name} se ne javlja. Sutra ide redovna provera.",
+        "headsup_blocked": "Najava za sutra nije preneta: poziv nije obavljen. Sutra ide redovna provera.",
         "consent_yes": "{name}: pristanak je dat. Pozivi su uključeni.",
         "consent_no": "{name}: pristanak nije dat. Pozivi su isključeni.",
         "consent_missing": (
@@ -89,6 +90,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "headsup_ok": "Tomorrow's warning was delivered. {name} says everything is fine.",
         "headsup_missed": "Tomorrow's warning was not delivered: {name} did not answer. The regular check runs tomorrow.",
+        "headsup_blocked": "Tomorrow's warning was not delivered: the call was not made. The regular check runs tomorrow.",
         "consent_yes": "{name}: consent given. Calls are on.",
         "consent_no": "{name}: consent not given. Calls are off.",
         "consent_missing": (

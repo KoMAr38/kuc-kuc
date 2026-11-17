@@ -153,13 +153,16 @@
   // Until when an introduction may ring where the person lives; later, the family is asked first.
   var INTRO_START = Number(app.getAttribute("data-intro-start")) || 8;
   var INTRO_END = Number(app.getAttribute("data-intro-end")) || 23;
+  // The hours the service itself calls in; outside them "Call now" asks first. From the settings.
+  var CALL_START = Number(app.getAttribute("data-call-start")) || 8;
+  var CALL_END = Number(app.getAttribute("data-call-end")) || 20;
   if (!app) {
     return;
   }
   var $ = function (id) {
     return document.getElementById(id);
   };
-  var state = { me: null, lang: "en", place: null, timer: null, shape: "", seen: {} };
+  var state = { me: null, lang: "en", place: null, timer: null, shape: "", seen: {}, expecting: 0 };
   try {
     var stored = localStorage.getItem("kuckuc-lang");
     if (stored) {
@@ -376,6 +379,8 @@
       if (result.ok) {
         var later = result.data && result.data.intro_at_local;
         say(later ? t("intro_later", { time: later }) : okText || "");
+        // The engine starts the call a few seconds later: keep looking for a minute even before it shows.
+        state.expecting = Date.now() + 60000;
         return refresh();
       }
       buttons.forEach(function (button) {
@@ -407,7 +412,7 @@
       call.type = "button";
       call.addEventListener("click", function () {
         var hour = hourThere(person.tz);
-        if (hour >= 8 && hour < 20) {
+        if (hour >= CALL_START && hour < CALL_END) {
           act(person, "/call-now", null, t("started"));
           return;
         }
@@ -561,12 +566,11 @@
   }
 
   // While a call is in progress, look again every few seconds so the timeline fills in by itself.
+  // Only while something runs, or just after the family started something: a person waiting for
+  // consent can wait for days, and a page left open must not read the database all that time.
   function keepWatching(running) {
     clearTimeout(state.timer);
-    var waiting = state.me && state.me.persons.some(function (person) {
-      return person.status === "pending_consent";
-    });
-    if (running || waiting) {
+    if (running || Date.now() < state.expecting) {
       state.timer = setTimeout(poll, 4000);
     }
   }
@@ -575,6 +579,11 @@
   // after four seconds, closed a question before it could be answered, and asked for the forecast again.
   function poll() {
     api("GET", "/api/family/me").then(function (result) {
+      if (result.status === 401) {
+        state.me = null; // the sign-in has expired: show the page as signed out
+        render();
+        return;
+      }
       if (!result.ok) {
         keepWatching(true); // a passing error: look again later
         return;

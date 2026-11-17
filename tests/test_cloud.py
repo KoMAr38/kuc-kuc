@@ -186,3 +186,4 @@ def test_each_service_gets_only_the_twilio_part_it_uses(monkeypatch):
     assert web.telephony is None and web.verify is not None
     voice = build_cloud_deps(settings, "voice")
     assert isinstance(voice.telephony, TwilioTelephony) and voice.verify is None
+    assert web.queue is None and voice.queue is None  # only the engine queues calls and timers

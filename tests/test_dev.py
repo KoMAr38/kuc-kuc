@@ -64,8 +64,8 @@ def test_family_page_works_in_the_local_preview_from_enrolment_to_a_finished_che
     place = client.get("/api/family/places", params={"q": "selo"}).json()[0]
     body = {
         "invite_code": "LOCAL", "name": "baba Vera", "family_name": "vaš unuk", "gender": "f",
-        "phone": "+15005550006", "lang": "sr", "lat": place["lat"], "lon": place["lon"], "place": place["name"],
-        "neighbors": [{"name": "Dragan", "phone": "+15005550007"}],
+        "phone": "+14155550106", "lang": "sr", "lat": place["lat"], "lon": place["lon"], "place": place["name"],
+        "neighbors": [{"name": "Dragan", "phone": "+14155550107"}],
     }  # fmt: skip
     pid = client.post("/api/family/persons", json=body).json()["id"]
 

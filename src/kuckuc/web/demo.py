@@ -51,6 +51,7 @@ _STATUS = {
     "phone_limit": 429,
     "ip_limit": 429,
     "budget": 503,
+    "busy": 503,
     "ended": 503,
     "low_balance": 503,
 }

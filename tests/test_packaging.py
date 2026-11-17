@@ -46,3 +46,26 @@ def test_a_release_checks_for_a_live_call_right_before_it_swaps_voice_and_engine
         swap = script.index(f"run_deploy {service} ")
         guard = script.rindex("guard_live_calls", 0, swap)
         assert build < guard < swap, service
+
+
+def test_the_release_guard_waits_as_long_as_a_call_counts_as_live_and_stops_on_any_other_failure():
+    import re
+
+    script = (ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    guard = script[script.index("guard_live_calls() {") : script.index("\n}\n", script.index("guard_live_calls() {"))]
+    tries = int(re.search(r"seq 1 (\d+)", guard).group(1))
+    wait = int(re.search(r"sleep (\d+)", guard).group(1))
+    assert tries * wait >= 15 * 60  # scripts/live_calls.py LIVE_FOR
+    assert "-ne 1 ]" in guard  # anything but "a call is live" stops the release at once
+
+
+def test_voice_keeps_its_old_secret_until_its_new_revision_is_running():
+    # Revoking first breaks the old revision's cold starts if the release then stops at the guard.
+    script = (ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    assert script.index("run_deploy voice ") < script.index("remove-iam-policy-binding twilio-verify-sid")
+
+
+def test_the_server_never_uses_the_one_library_the_pins_cannot_cover():
+    # uvloop is installed only on Linux, so a pip freeze on Windows cannot pin it; the asyncio loop needs no pin.
+    script = (ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    assert "--loop,asyncio" in script

@@ -516,3 +516,94 @@ def test_what_was_said_before_the_reask_is_kept_when_the_call_ends_unclear(voice
     voice.twilio_post("/status/c1", {"CallStatus": "completed"})
     call = voice.deps.store.get_call("c1")
     assert (call.answer, call.transcript, call.recording_key) == (Answer.UNCLEAR, "Halo? Ko je to?", "recordings/c1-1.wav")
+
+
+
+# --- audit 17 Nov, second round -------------------------------------------------------------
+
+
+def test_a_speech_failure_never_ends_a_call_another_delivery_is_dialling(voice):
+    # Two deliveries of one task: the other one claimed and dialled while this one made speech.
+    class ClaimedMeanwhile:
+        def audio_key(self, text, lang):
+            voice.deps.store.start_dialing("c1", T0)
+            raise RuntimeError("synthesis down")
+
+    voice.deps.tts = ClaimedMeanwhile()
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.published("call.completed") == [] and voice.deps.store.get_call("c1").status == "dialing"
+
+
+def test_the_kill_switch_never_blocks_a_call_another_delivery_is_dialling(voice):
+    voice.deps.store.runtime.kill_switch = True
+    read = voice.deps.store.get_runtime
+
+    def claimed_meanwhile():
+        voice.deps.store.start_dialing("c1", T0)
+        return read()
+
+    voice.deps.store.get_runtime = claimed_meanwhile
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.published("call.blocked") == [] and voice.deps.store.get_call("c1").status == "dialing"
+
+
+def test_a_call_reported_finished_while_dialling_stays_finished(voice):
+    # "busy" reached another server before this one wrote "placed".
+    original = voice.deps.telephony.place_call
+
+    def place_then_busy(*args, **kwargs):
+        sid = original(*args, **kwargs)
+        voice.deps.store.complete_call("c1", Answer.NO_ANSWER, None, None)
+        return sid
+
+    voice.deps.telephony.place_call = place_then_busy
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.deps.store.get_call("c1").status == "completed"
+
+
+def test_the_providers_copy_is_deleted_even_when_storing_ours_fails(voice):
+    def broken(*args, **kwargs):
+        raise RuntimeError("bucket unavailable")
+
+    voice.deps.blobs.put = broken
+    voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    assert voice.deps.telephony.deleted == ["https://x/r1"]
+
+
+def test_a_recording_for_a_call_that_already_ended_is_deleted_too(voice):
+    voice.deps.store.complete_call("c1", Answer.UNCLEAR, None, None)
+    voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    assert voice.deps.telephony.deleted == ["https://x/r1"]
+
+
+def test_the_transcript_kept_belongs_to_the_recording_kept(voice):
+    from kuckuc.speech.interpret import Interpretation
+
+    class FirstThenDown:
+        calls = 0
+
+        def interpret(self, audio, lang, question):
+            self.calls += 1
+            if self.calls == 1:
+                return Interpretation(Answer.UNCLEAR, "Halo? Ko je to?")
+            raise RuntimeError("model down")
+
+    voice.deps.interpreter = FirstThenDown()
+    voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    voice.twilio_post("/recording/c1?n=2", {"RecordingUrl": "https://x/r2"})
+    call = voice.deps.store.get_call("c1")
+    assert call.recording_key == "recordings/c1-2.wav" and not call.transcript
+
+
+def test_when_the_opening_cannot_be_played_the_call_counts_as_failed_not_hung_up(voice):
+    voice.deps.tts = RaisingTts()
+    reply = voice.twilio_post("/twiml/c1")
+    assert "<Hangup/>" in reply.text
+    call = voice.deps.store.get_call("c1")
+    assert call.answer == Answer.UNCLEAR and ("call_failed", {"role": "person"}) in voice.timeline()
+
+
+def test_a_call_that_already_ended_on_our_side_only_says_goodbye_when_picked_up(voice):
+    voice.deps.store.complete_call("c1", Answer.NO_ANSWER, None, None)
+    body = voice.twilio_post("/twiml/c1").text
+    assert "<Record" not in body and "call_answered" not in [type for type, _ in voice.timeline()]

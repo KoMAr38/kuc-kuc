@@ -126,7 +126,7 @@ src/kuckuc/
   store_firestore.py    the same interface on Firestore
   local.py, dev.py      everything wired in memory, for tests and local preview
 deploy/                 setup.sh, deploy.sh
-tests/                  over 440 tests; none needs a network
+tests/                  over 500 tests; none needs a network (store tests can also run on Firestore)
 ```
 
 ## Thanks

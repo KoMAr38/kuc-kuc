@@ -34,3 +34,14 @@ def test_a_call_queued_long_before_it_rang_counts_from_when_it_was_placed():
         "placed_at": (NOW - timedelta(minutes=1)).isoformat(),
     }
     assert live_calls([row], NOW) == 1
+
+
+def test_a_failure_to_look_is_not_reported_as_a_live_call(monkeypatch):
+    # Exit 1 means "a call is live" and makes the release wait; missing credentials must not look like that.
+    import google.cloud.firestore as firestore
+
+    def no_credentials(*args, **kwargs):
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(firestore, "Client", no_credentials)
+    assert live_calls_module.main() == 2

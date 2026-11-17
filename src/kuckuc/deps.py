@@ -80,7 +80,9 @@ def build_cloud_deps(settings: Settings, role: Literal["engine", "voice", "web",
             engine_url=settings.engine_url,
             invoker=settings.invoker_email,
             clock=clock,
-        ),
+        )
+        if role == "engine"  # only the engine queues calls and timers
+        else None,
         blobs=GcsBlobs(storage.Client(project=settings.project).bucket(settings.bucket)),
         notifier=LogNotifier(),
         clock=clock,
@@ -88,7 +90,7 @@ def build_cloud_deps(settings: Settings, role: Literal["engine", "voice", "web",
     if role == "engine" and settings.telegram_bot_token:
         from kuckuc.engine.notify import TelegramNotifier, telegram_post
 
-        post = telegram_post(httpx.Client(timeout=10))
+        post = telegram_post(httpx.Client(timeout=5))  # three tries stay under 20 s
         deps.notifier = TelegramNotifier(deps.store, settings.telegram_bot_token, post)
     if role in ("voice", "web"):
         from kuckuc.telephony.twilio_provider import TwilioTelephony, TwilioVerify

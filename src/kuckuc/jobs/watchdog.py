@@ -51,7 +51,8 @@ def run_watchdog(deps: Deps) -> list[str]:
         def close(current: Episode, seen: Episode = ep, result: Result = result) -> Episode | None:
             if current.state != seen.state or current.updated_at != seen.updated_at:
                 return None  # it moved since we looked: not stuck after all
-            return current.model_copy(update={"state": EpisodeState.CLOSED, "result": result, "updated_at": now})
+            update = {"state": EpisodeState.CLOSED, "result": result, "updated_at": now, "pending": None}
+            return current.model_copy(update=update)
 
         if deps.store.update_episode(ep.id, close) is None:
             continue
@@ -71,7 +72,12 @@ def _tell_family(deps: Deps, ep: Episode) -> None:
     if ep.kind == EpisodeKind.INTRO_NEIGHBOR and ep.neighbor_id:
         neighbor = deps.store.get_neighbor(ep.neighbor_id)
         name = neighbor.name if neighbor else name
-    key, urgent = ("intro_lost", False) if ep.kind in _INTROS else ("lost_track", True)
+    if ep.kind in _INTROS:
+        key, urgent = "intro_lost", False
+    elif ep.kind == EpisodeKind.HEADSUP:
+        key, urgent = "headsup_blocked", False  # the day before: tomorrow's check still comes
+    else:
+        key, urgent = "lost_track", True
     params = {"name": name, "neighbor": "", "hazard": ep.hazard or ""}
     delivered = deps.notifier.send(person.owner_uid, key, params, urgent)
     deps.store.add_timeline(

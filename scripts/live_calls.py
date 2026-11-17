@@ -1,6 +1,6 @@
 """Is a phone call under way right now? Run by deploy.sh before it replaces voice or engine.
 
-    python scripts/live_calls.py      # exit 0: nobody is on the phone; exit 1: a call is live
+    python scripts/live_calls.py      # exit 0: nobody is on the phone; 1: a call is live; 2: could not look
 
 A release swaps servers under a running call: on 17 November 2026 that made one answer reach two
 servers and turned it into "unclear". A call counts as live while it is being dialled or has been
@@ -38,9 +38,14 @@ def main() -> int:
 
     from kuckuc.config import Settings
 
-    db = firestore.Client(project=Settings().project or None)
-    query = db.collection("calls").where(filter=FieldFilter("status", "in", list(LIVE_STATUSES)))
-    rows = [s.to_dict() for s in query.stream()]
+    try:
+        db = firestore.Client(project=Settings().project or None)
+        query = db.collection("calls").where(filter=FieldFilter("status", "in", list(LIVE_STATUSES)))
+        rows = [s.to_dict() for s in query.stream()]
+    except Exception as exc:
+        # Not knowing is not "a call is live": the release stops and says why.
+        print(f"could not read the calls ({type(exc).__name__})", file=sys.stderr)
+        return 2
     live = live_calls(rows, datetime.now(UTC))
     print(f"calls under way: {live}")
     return 1 if live else 0

@@ -89,3 +89,13 @@ def test_a_check_that_moves_while_the_watchdog_looks_is_left_alone(sys):
     sys.deps.store.list_open_episodes = listed_then_moved
     assert run_watchdog(sys.deps) == []
     assert sys.deps.store.get_episode(ep_id).state == EpisodeState.WAITING_FOLLOWUP
+
+
+
+def test_a_heads_up_whose_timer_was_lost_is_reported_quietly(sys):
+    sys.deps.store.create_episode(
+        make_episode(id="h1", kind=EpisodeKind.HEADSUP, state=EpisodeState.SCHEDULED, due_at=T0, updated_at=T0)
+    )
+    sys.clock.advance(46 * 60)
+    assert run_watchdog(sys.deps) == ["h1"]
+    assert notices(sys)[-1] == ("headsup_blocked", False)

@@ -10,6 +10,9 @@ tests see in memory. Three things are added on top because Firestore needs them:
 
 from __future__ import annotations
 
+import random
+import time
+
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
@@ -59,6 +62,9 @@ def _utc_now() -> datetime:
 
 def _eq(field: str, value) -> FieldFilter:
     return FieldFilter(field, "==", value)
+
+
+RESERVE_ATTEMPTS = 6
 
 
 class FirestoreStore:
@@ -143,8 +149,6 @@ class FirestoreStore:
     def create_alert(self, a: Alert) -> bool:
         return self._create("alerts", a.id, a)
 
-    def alert_exists(self, alert_id: str) -> bool:
-        return bool(self._col("alerts").document(alert_id).get().exists)
 
     def get_alert(self, alert_id: str) -> Alert | None:
         return self._get("alerts", alert_id, Alert)
@@ -230,6 +234,19 @@ class FirestoreStore:
             if not snap.exists or snap.get("status") != "queued":
                 return False
             transaction.update(ref, {"status": "dialing", "placed_at": at})
+            return True
+
+        return run(self._db.transaction())
+
+    def mark_placed(self, call_id: str, provider_sid: str) -> bool:
+        ref = self._col("calls").document(call_id)
+
+        @firestore.transactional
+        def run(transaction) -> bool:
+            snap = ref.get(transaction=transaction)
+            if not snap.exists or snap.get("status") != "dialing":
+                return False
+            transaction.update(ref, {"status": "placed", "provider_sid": provider_sid})
             return True
 
         return run(self._db.transaction())
@@ -322,7 +339,15 @@ class FirestoreStore:
             transaction.set(spend_ref, {"usd": round(spent + usd, 4)}, merge=True)
             return None
 
-        return run(self._db.transaction())
+        # Many visitors at once all want the day's counter: Firestore aborts all but one of the
+        # colliding transactions. Try again after a short, random pause; only then say "busy".
+        for attempt in range(RESERVE_ATTEMPTS):
+            try:
+                return run(self._db.transaction())
+            except (gexc.Aborted, ValueError):
+                if attempt + 1 < RESERVE_ATTEMPTS:
+                    time.sleep(random.uniform(0.05, 0.3) * (attempt + 1))
+        return "busy"
 
     def add_demo_spend(self, day: date, usd: float) -> float:
         self._col("demo_days").document(day.isoformat()).set({"usd": firestore.Increment(usd)}, merge=True)

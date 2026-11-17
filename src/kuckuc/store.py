@@ -39,7 +39,6 @@ class Store(Protocol):
     def put_neighbor(self, n: Neighbor) -> None: ...
 
     def create_alert(self, a: Alert) -> bool: ...
-    def alert_exists(self, alert_id: str) -> bool: ...
     def get_alert(self, alert_id: str) -> Alert | None: ...
 
     def create_episode(self, e: Episode) -> bool: ...
@@ -58,6 +57,7 @@ class Store(Protocol):
     def list_calls_for_episode(self, episode_id: str) -> list[CallRecord]: ...
     def claim_recording(self, call_id: str, n: int) -> bool: ...
     def start_dialing(self, call_id: str, at: datetime) -> bool: ...
+    def mark_placed(self, call_id: str, provider_sid: str) -> bool: ...
 
     def add_timeline(self, episode_id: str, type: str, public: dict[str, str]) -> None: ...
     def list_timeline(self, episode_id: str, after_seq: int = 0) -> list[TimelineEvent]: ...
@@ -99,7 +99,7 @@ class MemoryStore:
         self._demo_sessions: dict[str, DemoSession] = {}
         self._demo_counts: dict[tuple[date, str], int] = {}
         self._demo_spend: dict[date, float] = {}
-        self._demo_lock = threading.Lock()
+        self._lock = threading.Lock()
         self._stat_docs: dict[str, dict] = {}
 
     # users
@@ -148,8 +148,6 @@ class MemoryStore:
         self._alerts[a.id] = a.model_copy(deep=True)
         return True
 
-    def alert_exists(self, alert_id: str) -> bool:
-        return alert_id in self._alerts
 
     def get_alert(self, alert_id: str) -> Alert | None:
         return _copy(self._alerts.get(alert_id))
@@ -231,10 +229,19 @@ class MemoryStore:
     def start_dialing(self, call_id: str, at: datetime) -> bool:
         """Moves a queued call to "dialing"; True for the first caller only, so a task delivered
         twice rings once."""
+        with self._lock:  # Firestore does this in a transaction; parallel requests must see one winner here too
+            call = self._calls.get(call_id)
+            if call is None or call.status != "queued":
+                return False
+            self._calls[call_id] = call.model_copy(update={"status": "dialing", "placed_at": at})
+            return True
+
+    def mark_placed(self, call_id: str, provider_sid: str) -> bool:
+        """"dialing" becomes "placed"; any other status (a call already finished) stays as it is."""
         call = self._calls.get(call_id)
-        if call is None or call.status != "queued":
+        if call is None or call.status != "dialing":
             return False
-        self._calls[call_id] = call.model_copy(update={"status": "dialing", "placed_at": at})
+        self._calls[call_id] = call.model_copy(update={"status": "placed", "provider_sid": provider_sid})
         return True
 
     def claim_recording(self, call_id: str, n: int) -> bool:
@@ -275,7 +282,7 @@ class MemoryStore:
         """Counts one use of every ``(key, limit, refusal)`` quota and adds ``usd`` to the day's
         spend, all at once or not at all. Returns the refusal of the first quota at its limit,
         "budget" when the spend would pass ``cap_usd``, or None when reserved."""
-        with self._demo_lock:
+        with self._lock:
             for key, limit, refusal in quotas:
                 if self._demo_counts.get((day, key), 0) >= limit:
                     return refusal
@@ -287,7 +294,7 @@ class MemoryStore:
             return None
 
     def add_demo_spend(self, day: date, usd: float) -> float:
-        with self._demo_lock:
+        with self._lock:
             self._demo_spend[day] = round(self._demo_spend.get(day, 0.0) + usd, 4)
             return self._demo_spend[day]
 

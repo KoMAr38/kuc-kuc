@@ -7,6 +7,7 @@ go in, but only their last three digits ever come back out.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import importlib.resources
 import logging
@@ -44,6 +45,7 @@ _NOT_A_PHONE = frozenset(
         phonenumbers.PhoneNumberType.UAN,
         phonenumbers.PhoneNumberType.VOICEMAIL,
         phonenumbers.PhoneNumberType.PAGER,
+        phonenumbers.PhoneNumberType.PERSONAL_NUMBER,  # UK 070: charged at a high rate
     }
 )
 
@@ -126,6 +128,8 @@ def to_e164(raw: str, tz: str) -> str | None:
         return None
     if not phonenumbers.is_valid_number(number) or phonenumbers.number_type(number) in _NOT_A_PHONE:
         return None
+    if phonenumbers.region_code_for_number(number) == "001":
+        return None  # satellite and other numbers of no country
     return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
 
 
@@ -156,8 +160,12 @@ def family_router(
     def refused(code: str, status: int) -> JSONResponse:
         return JSONResponse({"code": code}, status_code=status)
 
-    def minute() -> str:
-        return deps.clock.now().strftime("%Y%m%d%H%M")
+    def after(episodes: list) -> str:
+        """Names a new episode by the newest one before it. Two quick clicks see the same newest
+        episode and name the same new one, which the engine starts once; a click after that one
+        has finished names another. (A name by the minute failed at both edges.)"""
+        newest = episodes[0].id if episodes else ""
+        return hashlib.sha1(newest.encode()).hexdigest()[:12]
 
     def running(
         person_id: str, kinds: tuple[EpisodeKind, ...] | None = None, states: tuple[EpisodeState, ...] = _IN_PROGRESS
@@ -385,11 +393,13 @@ def family_router(
         person = owned_person(person_id, user)
         if person.status != PersonStatus.ACTIVE:
             return refused("not_active", 409)
-        if running(person.id):
+        episodes = deps.store.list_episodes(person.id, limit=20)
+        # A neighbour's introduction never calls her, so it does not stand in the way of a check.
+        if any(e.state in _IN_PROGRESS and e.kind != EpisodeKind.INTRO_NEIGHBOR for e in episodes):
             return refused("busy", 409)
         # The engine creates the episode a few seconds later. Until then a second click passes the
         # check above, so both clicks name the same episode, and the engine starts it once.
-        episode_id = f"{person.id}:manual:{minute()}"
+        episode_id = f"{person.id}:manual:{after(episodes)}"
         deps.bus.publish("check.requested", {"person_id": person.id, "kind": "manual", "episode_id": episode_id})
         return {"episode_id": episode_id}
 
@@ -409,7 +419,8 @@ def family_router(
             return refused("not_pending", 409)
         if running(person.id, (EpisodeKind.INTRO,), (*_IN_PROGRESS, EpisodeState.SCHEDULED)):
             return refused("busy", 409)  # one is under way, or planned for the morning
-        deps.bus.publish("intro.requested", {"person_id": person.id, "episode_id": f"{person.id}:intro:{minute()}"})
+        intros = [e for e in deps.store.list_episodes(person.id, limit=20) if e.kind == EpisodeKind.INTRO]
+        deps.bus.publish("intro.requested", {"person_id": person.id, "episode_id": f"{person.id}:intro:{after(intros)}"})
         return {"ok": True, "intro_at_local": intro_at_local(person.tz)}
 
     @router.post("/api/family/persons/{person_id}/neighbors/{neighbor_id}/intro", status_code=202)
@@ -427,13 +438,15 @@ def family_router(
             # A recorded "no" is asked again only once the family says the neighbour agreed to it.
             return refused("agreed_needed", 409)
         planned_or_running = (*_IN_PROGRESS, EpisodeState.SCHEDULED)
-        if any(
-            e.kind == EpisodeKind.INTRO_NEIGHBOR and e.neighbor_id == neighbor.id and e.state in planned_or_running
+        intros = [
+            e
             for e in deps.store.list_episodes(person.id, limit=20)
-        ):
+            if e.kind == EpisodeKind.INTRO_NEIGHBOR and e.neighbor_id == neighbor.id
+        ]
+        if any(e.state in planned_or_running for e in intros):
             return refused("busy", 409)
         now = bool(body and body.now)
-        intro_id = f"{neighbor.id}:intro:{minute()}"  # two quick clicks start one introduction
+        intro_id = f"{neighbor.id}:intro:{after(intros)}"  # two quick clicks start one introduction
         deps.bus.publish("intro.requested", {"neighbor_id": neighbor.id, "now": now, "episode_id": intro_id})
         log.info("neighbour %s asked again (was %s)", neighbor.id, neighbor.status.value)
         return {"ok": True, "intro_at_local": None if now else intro_at_local(person.tz)}

@@ -169,3 +169,11 @@ def test_only_the_providers_number_errors_count_as_a_refused_number():
     assert TelephonyError("x", status=404, code="20404").refused is False  # our account id
     assert TelephonyError("x", status=400, code="21212").refused is False  # our own From number
     assert TelephonyError("x", status=429, code="20429").refused is False
+
+
+def test_a_rate_limit_is_neither_a_refused_number_nor_our_own_fault():
+    # A 429 is retried as "no answer"; counting it as ours would close the check without a neighbour.
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    error = TelephonyError("x", status=429, code="20429")
+    assert error.refused is False and error.ours is False

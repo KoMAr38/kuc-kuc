@@ -29,19 +29,25 @@ SERVICES="${SERVICES:-voice engine web forecast-scan watchdog loadtest telegram-
 # Never swap the servers a running phone call depends on: on 17 November a release in the middle of
 # a call made one answer reach two servers and turned it into "unclear" (scripts/live_calls.py).
 # Checked right before each swap, not before the build: a call can start while the image builds.
-# Waits up to ten minutes for the call to end, then stops.
+# Waits as long as a call can count as live (16 minutes), then stops. Any other failure (no
+# credentials, no Python) stops the release at once: not knowing is not the same as a live call.
 guard_live_calls() {
   [ -n "${FORCE_DEPLOY:-}" ] && return 0
   local python="${PYTHON:-.venv/Scripts/python}"
   [ -x "$python" ] || python=".venv/bin/python"
-  for _ in $(seq 1 20); do
-    if PYTHONPATH=src GCP_PROJECT="$PROJECT" KUCKUC_PROJECT="$PROJECT" "$python" scripts/live_calls.py; then
-      return 0
+  local status
+  for _ in $(seq 1 32); do
+    status=0
+    PYTHONPATH=src GCP_PROJECT="$PROJECT" KUCKUC_PROJECT="$PROJECT" "$python" scripts/live_calls.py || status=$?
+    [ "$status" -eq 0 ] && return 0
+    if [ "$status" -ne 1 ]; then
+      echo "Could not check for a call under way (exit $status). Nothing was replaced; fix that and deploy again." >&2
+      exit 1
     fi
     echo "   a call is under way; waiting for it to end" >&2
     sleep 30
   done
-  echo "A call has been under way for ten minutes. Deploy again later, or set FORCE_DEPLOY=1." >&2
+  echo "A call has counted as under way for 16 minutes. Deploy again later, or set FORCE_DEPLOY=1." >&2
   exit 1
 }
 TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
@@ -78,7 +84,7 @@ run_deploy() { # run_deploy <service> <module> <flags...>
   gcloud run deploy "$service" --project "$PROJECT" --region "$REGION" --image "$IMAGE" \
     --service-account "$service-sa@$SA_DOMAIN" \
     --min-instances 0 --cpu 1 --memory 512Mi --concurrency 40 \
-    --command uvicorn --args "$module,--host,0.0.0.0,--port,8080" \
+    --command uvicorn --args "$module,--host,0.0.0.0,--port,8080,--loop,asyncio" \
     --set-env-vars "$ENV" --quiet "$@"
 }
 
@@ -88,14 +94,16 @@ for service in $SERVICES; do
       say "Deploying voice (public: the phone company calls it; it checks every request itself)"
       # Voice dials and never verifies numbers, so it does not get the Verify service's id.
       allow_secrets voice-sa twilio-account-sid twilio-auth-token twilio-from-number
-      gcloud secrets remove-iam-policy-binding twilio-verify-sid --project "$PROJECT" --quiet \
-        --member "serviceAccount:voice-sa@$SA_DOMAIN" --role roles/secretmanager.secretAccessor >/dev/null 2>&1 || true
       VOICE_SECRETS="KUCKUC_TWILIO_ACCOUNT_SID=twilio-account-sid:latest"
       VOICE_SECRETS="$VOICE_SECRETS,KUCKUC_TWILIO_AUTH_TOKEN=twilio-auth-token:latest"
       VOICE_SECRETS="$VOICE_SECRETS,KUCKUC_TWILIO_FROM_NUMBER=twilio-from-number:latest"
       guard_live_calls
       run_deploy voice kuckuc.voice.main:app --allow-unauthenticated \
         --timeout 30 --max-instances 20 --cpu-boost --set-secrets "$VOICE_SECRETS"
+      # Only now, with the new revision running, is the old Verify secret taken away. A rollback of voice
+      # to a revision from before 17 Nov 2026 needs it back first: allow_secrets voice-sa twilio-verify-sid.
+      gcloud secrets remove-iam-policy-binding twilio-verify-sid --project "$PROJECT" --quiet \
+        --member "serviceAccount:voice-sa@$SA_DOMAIN" --role roles/secretmanager.secretAccessor >/dev/null 2>&1 || true
       ;;
     engine)
       say "Deploying engine (private: only Pub/Sub and Cloud Tasks can reach it)"

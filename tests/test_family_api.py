@@ -7,7 +7,7 @@ from helpers import build_sys, complete, real_calls
 from kuckuc.models import Answer, EpisodeKind, PersonStatus, ScriptKind, Target
 
 INVITE = "TEST-INVITE"
-PERSON_PHONE = "+15005550006"
+PERSON_PHONE = "+14155550106"
 
 
 def client_for(sys, email=None):
@@ -139,7 +139,7 @@ def test_enrol_requires_valid_invite(family):
 
 def test_enrol_creates_pending_person_and_requests_intros(family):
     pid = family.post(
-        "/api/family/persons", json=enrol_body(neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+        "/api/family/persons", json=enrol_body(neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     ).json()["id"]
     assert family.deps.store.get_person(pid).status == PersonStatus.PENDING_CONSENT
     assert [t for t, _ in family.deps.bus.published].count("intro.requested") == 2
@@ -147,7 +147,7 @@ def test_enrol_creates_pending_person_and_requests_intros(family):
 
 
 def test_enrolled_person_is_stored_as_entered_and_belongs_to_the_signed_in_user(family):
-    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}, {"name": "Rada", "phone": "+15005550008"}])
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}, {"name": "Rada", "phone": "+14155550108"}])
     person = family.deps.store.get_person(pid)
     me = family.deps.store.get_user(person.owner_uid)
     assert me.email == "petar@example.com"
@@ -162,8 +162,8 @@ def test_enrolled_person_is_stored_as_entered_and_belongs_to_the_signed_in_user(
     assert (person.demo, person.sim) == (False, False)
     neighbours = family.deps.store.list_neighbors(pid)
     assert [(n.name, n.phone, n.order, n.status) for n in neighbours] == [
-        ("Dragan", "+15005550007", 0, PersonStatus.PENDING_CONSENT),
-        ("Rada", "+15005550008", 1, PersonStatus.PENDING_CONSENT),
+        ("Dragan", "+14155550107", 0, PersonStatus.PENDING_CONSENT),
+        ("Rada", "+14155550108", 1, PersonStatus.PENDING_CONSENT),
     ]
 
 
@@ -196,11 +196,11 @@ def test_at_most_three_neighbours(family):
 
 
 def test_intro_calls_go_to_the_person_and_to_each_neighbour(family):
-    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     calls = {c.script: c for c in real_calls(family.sys)}
     assert calls[ScriptKind.INTRO_PERSON].to == PERSON_PHONE
     assert calls[ScriptKind.INTRO_PERSON].params["family"] == "vaš unuk"
-    assert calls[ScriptKind.INTRO_NEIGHBOR].to == "+15005550007"
+    assert calls[ScriptKind.INTRO_NEIGHBOR].to == "+14155550107"
     assert calls[ScriptKind.INTRO_NEIGHBOR].params["name"] == "baba Vera"
     assert family.deps.store.get_person(pid).status == PersonStatus.PENDING_CONSENT
 
@@ -209,11 +209,11 @@ def test_intro_calls_go_to_the_person_and_to_each_neighbour(family):
 
 
 def test_me_masks_phone(family):
-    enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     text = family.get("/api/family/me").text
     assert "+1500555" not in text and "5005550" not in text
     person = family.get("/api/family/me").json()["persons"][0]
-    assert person["phone"].endswith("006") and person["neighbors"][0]["phone"].endswith("007")
+    assert person["phone"].endswith("106") and person["neighbors"][0]["phone"].endswith("107")
     assert (person["name"], person["status"], person["place"]) == ("baba Vera", "pending_consent", "Beograd")
     assert person["neighbors"][0]["name"] == "Dragan" and person["neighbors"][0]["status"] == "pending_consent"
 
@@ -484,7 +484,7 @@ def night(client):
 
 def test_enrolling_at_night_calls_nobody_until_eight_in_the_morning_there(family):
     night(family)
-    reply = family.post("/api/family/persons", json=enrol_body(neighbors=[{"name": "Dragan", "phone": "+15005550007"}]))
+    reply = family.post("/api/family/persons", json=enrol_body(neighbors=[{"name": "Dragan", "phone": "+14155550107"}]))
     assert reply.status_code == 201 and reply.json()["intro_at_local"] == "08:00"
     family.sys.run_tasks(0)
     assert real_calls(family.sys) == [] and family.deps.telephony.placed == []
@@ -563,7 +563,7 @@ def test_the_sign_in_page_says_it_is_for_invited_families(web):
 def test_the_same_number_cannot_be_enrolled_twice_by_one_family(family):
     # A double click once enrolled a grandmother twice, so every call came in pairs.
     assert family.post("/api/family/persons", json=enrol_body()).status_code == 201
-    again = family.post("/api/family/persons", json=enrol_body(phone="+1 500 555 0006"))  # same number, other spelling
+    again = family.post("/api/family/persons", json=enrol_body(phone="+1 415 555 0106"))  # same number, other spelling
     assert again.status_code == 409 and again.json()["code"] == "already_enrolled"
     assert len(family.get("/api/family/me").json()["persons"]) == 1
 
@@ -581,7 +581,7 @@ def test_the_page_locks_the_enrol_button_while_it_waits(family):
 
 
 def missed_neighbour_intro(family):
-    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     for _ in range(3):  # he does not answer three times
         (pending,) = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR]
         complete(family.sys, pending, Answer.NO_ANSWER)
@@ -651,7 +651,7 @@ def test_the_page_knows_until_when_introductions_ring(web):
 
 
 def declined_neighbour(family):
-    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     (call,) = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR]
     complete(family.sys, call, Answer.NO)
     (neighbor,) = family.get("/api/family/me").json()["persons"][0]["neighbors"]
@@ -721,7 +721,7 @@ def test_two_quick_clicks_on_a_neighbours_introduction_start_one(family):
 
 
 def test_a_persons_introduction_can_be_repeated_while_a_neighbours_is_under_way(family):
-    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     for _ in range(3):
         (pending,) = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_PERSON]
         complete(family.sys, pending, Answer.NO_ANSWER)
@@ -736,3 +736,45 @@ def test_a_premium_rate_number_is_never_enrolled(family):
     neighbour = {"name": "Dragan", "phone": "+1 900 555 0100"}
     r = family.post("/api/family/persons", json=enrol_body(neighbors=[neighbour]))
     assert r.status_code == 422 and r.json()["code"] == "bad_number"
+
+
+
+# --- audit 17 Nov, second round -------------------------------------------------------------
+
+
+def test_a_second_call_now_after_a_quick_check_starts_a_new_one(family):
+    # She answered "fine" within the minute; the family clicks again in that same minute.
+    pid = enrol(family)
+    activate(family, pid)
+    assert family.post(f"/api/family/persons/{pid}/call-now").status_code == 202
+    (first,) = [c for c in real_calls(family.sys) if c.script == ScriptKind.CHECK_MANUAL]
+    complete(family.sys, first, Answer.OK)
+    assert family.post(f"/api/family/persons/{pid}/call-now").status_code == 202
+    assert len([c for c in real_calls(family.sys) if c.script == ScriptKind.CHECK_MANUAL]) == 2
+
+
+def test_clicks_on_both_sides_of_a_minute_start_one_check(family):
+    pid = enrol(family)
+    activate(family, pid)
+    held = hold_events(family)
+    family.sys.clock.advance(59)
+    family.post(f"/api/family/persons/{pid}/call-now")
+    family.sys.clock.advance(2)
+    family.post(f"/api/family/persons/{pid}/call-now")
+    ids = [d["episode_id"] for t, d in held if t == "check.requested"]
+    assert len(ids) == 2 and ids[0] == ids[1]
+
+
+def test_call_now_is_not_blocked_by_a_neighbours_introduction(family):
+    # The neighbour missed his introduction and it is being tried again; she can still be checked on.
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
+    activate(family, pid)
+    assert any(c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR for c in real_calls(family.sys))
+    assert family.post(f"/api/family/persons/{pid}/call-now").status_code == 202
+
+
+def test_personal_and_satellite_numbers_are_never_enrolled(family):
+    # UK 070 "personal numbers" are charged at a high rate; satellite numbers too.
+    for number in ("+44 7012 345678", "+881 6 3123 4567"):
+        r = family.post("/api/family/persons", json=enrol_body(phone=number))
+        assert r.status_code == 422 and r.json()["code"] == "bad_number", number

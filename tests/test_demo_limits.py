@@ -225,3 +225,25 @@ def test_the_demo_day_follows_california():
 
     assert demo_day(datetime(2026, 11, 21, 3, 0, tzinfo=UTC)) == date(2026, 11, 20)
     assert demo_day(datetime(2026, 11, 20, 9, 0, tzinfo=UTC)) == date(2026, 11, 20)
+
+
+
+def test_a_failed_balance_read_is_remembered_for_a_minute():
+    # Asking again on every request made each one wait up to 10 s while the provider was down.
+    from datetime import timedelta
+
+    from kuckuc.web.demo_limits import CachedBalance
+
+    asked = []
+
+    class Down:
+        def balance_usd(self):
+            asked.append(1)
+            raise RuntimeError("provider down")
+
+    clock = FixedClock(T0)
+    balance = CachedBalance(Down(), clock)
+    assert balance.balance_usd() == 0.0 and balance.balance_usd() == 0.0 and len(asked) == 1
+    clock.advance(61)
+    balance.balance_usd()
+    assert len(asked) == 2

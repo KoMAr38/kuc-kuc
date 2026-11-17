@@ -18,10 +18,9 @@ def test_create_episode_is_idempotent(store):
 
 def test_alert_is_created_once_and_can_be_read_back(store):
     alert = make_alert(person_id="p1", hazard="cold", day=TODAY, value=-12.4)
-    assert store.alert_exists(alert.id) is False and store.get_alert(alert.id) is None
+    assert store.get_alert(alert.id) is None
     assert store.create_alert(alert) is True
     assert store.create_alert(alert.model_copy(update={"value": -20.0})) is False
-    assert store.alert_exists(alert.id) is True
     assert store.get_alert(alert.id) == alert
 
 
@@ -212,3 +211,46 @@ def test_a_demo_reservation_counts_every_quota_and_the_money_all_or_nothing(stor
     assert store.reserve_demo(TODAY, [("run:other", 2, "phone_limit")], 3.5, 5.0) == "budget"  # 2 + 3.5 > 5
     assert store.demo_count(TODAY, "run:other") == 0 and store.get_demo_spend(TODAY) == 2.0
     assert store.demo_count(TODAY + timedelta(days=1), "run:ph") == 0
+
+
+def test_a_call_is_marked_placed_only_from_dialling(store):
+    store.put_call(make_call(id="c1"))
+    assert store.mark_placed("c1", "CA1") is False  # still queued
+    store.start_dialing("c1", T0)
+    assert store.mark_placed("c1", "CA1") is True
+    assert (store.get_call("c1").status, store.get_call("c1").provider_sid) == ("placed", "CA1")
+    store.complete_call("c1", Answer.OK, None, None)
+    assert store.mark_placed("c1", "CA1") is False and store.get_call("c1").status == "completed"
+
+
+
+def test_a_call_counts_on_the_day_where_the_person_lives(store):
+    # 23:30 UTC on the 20th is already the 21st in Belgrade: the daily cap counts it on the 21st.
+    from datetime import UTC, date, datetime
+
+    store.create_episode(make_episode(id="e1", person_id="p1"))
+    late = datetime(2026, 11, 20, 23, 30, tzinfo=UTC)
+    store.put_call(make_call(id="c1", episode_id="e1", created_at=late, local_day="2026-11-21"))
+    assert store.count_person_calls("p1", date(2026, 11, 21)) == 1
+    assert store.count_person_calls("p1", date(2026, 11, 20)) == 0
+
+
+def test_parallel_reservations_never_pass_a_limit(store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(lambda _: store.reserve_demo(TODAY, [("run:ph", 2, "phone_limit")], 0.1, 100.0), range(6)))
+    # Never more than the limit, never an error; the counter and the money agree with what passed.
+    # (On Firestore, requests that collided too often are told "busy" rather than failing.)
+    assert set(results) <= {None, "phone_limit", "busy"} and 1 <= results.count(None) <= 2
+    assert store.demo_count(TODAY, "run:ph") == results.count(None)
+    assert store.get_demo_spend(TODAY) == round(0.1 * results.count(None), 4)
+
+
+def test_parallel_claims_dial_a_call_once(store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store.put_call(make_call(id="c1"))
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(lambda _: store.start_dialing("c1", T0), range(6)))
+    assert results.count(True) == 1

@@ -142,6 +142,9 @@ class Episode(BaseModel):
     neighbor_index: int = 0
     # The neighbours who had said yes when the episode started, in order; None until it starts.
     neighbor_ids: list[str] | None = None
+    # How many steps were saved, and the actions of the last one until they are carried out.
+    steps: int = 0
+    pending: list[dict] | None = None
     neighbor_attempts: int = 0
     followup_attempts: int = 0
     unwell: bool = False

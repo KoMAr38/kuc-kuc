@@ -277,3 +277,12 @@ def test_an_odd_token_is_refused_without_reaching_the_store(web):
     web.deps.store.get_demo_session_by_token = strict
     r = web.get("/api/demo/timeline/x", params={"token": "../x", "after": 0})
     assert r.status_code == 403
+
+
+
+def test_a_demo_too_busy_to_count_says_so_and_asks_to_try_again(web):
+    # Firestore gives up on a counter that too many requests wanted at the same moment.
+    token = verified_token(web)
+    web.deps.store.reserve_demo = lambda *args, **kwargs: "busy"
+    r = web.post("/api/demo/run", json={"token": token, "scenario": "heat"})
+    assert r.status_code == 503 and r.json()["code"] == "busy"

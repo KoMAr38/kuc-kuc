@@ -111,6 +111,7 @@ def create_web_app(
             "family.html",
             google_client_id=deps.settings.google_oauth_client_id,
             intro_hours=(deps.settings.quiet_start_hour, deps.settings.intro_end_hour),
+            call_hours=(deps.settings.quiet_start_hour, deps.settings.quiet_end_hour),
             # Typing an email instead of signing in exists only where the Google check was replaced (preview, tests).
             local_sign_in=verify_credential is not verify_google_credential,
         )

@@ -5,7 +5,7 @@ import pytest
 
 from factories import make_episode, make_neighbor, make_person
 from fastapi.testclient import TestClient
-from helpers import complete, only_call, only_new_call, real_calls, request_check, seed_person_calls
+from helpers import build_sys, complete, only_call, only_new_call, real_calls, request_check, seed_person_calls
 
 from kuckuc.engine.app import handle_event
 from kuckuc.engine.guards import call_block_reason
@@ -536,3 +536,98 @@ def test_a_store_that_runs_a_change_twice_still_queues_one_call(sys):
     store.update_episode = twice
     request_check(sys)
     assert len(real_calls(sys)) == 1
+
+
+
+# --- audit 17 Nov, second round -------------------------------------------------------------
+
+
+def test_a_check_whose_first_step_failed_starts_when_the_request_comes_again(sys):
+    original, failed = sys.deps.store.update_episode, []
+
+    def give_up_once(episode_id, fn):
+        if not failed:
+            failed.append(episode_id)
+            raise ValueError("Failed to commit transaction in 5 attempts.")
+        return original(episode_id, fn)
+
+    sys.deps.store.update_episode = give_up_once
+    data = {"person_id": "p1", "kind": "manual", "episode_id": "e-now"}
+    with pytest.raises(ValueError):
+        handle_event(sys.deps, "m-1", "check.requested", data)
+    handle_event(sys.deps, "m-1", "check.requested", data)  # Pub/Sub delivers it again
+    assert [c.target for c in real_calls(sys)] == [Target.PERSON]
+
+
+def test_a_step_saved_but_not_carried_out_is_carried_out_when_the_event_comes_again(sys):
+    # She says she is not well; the neighbour's call is saved in the episode, then queueing it fails once.
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    original, failed = sys.deps.queue.enqueue_call, []
+
+    def fail_once(call_id, delay_s, sim=False):
+        if not failed:
+            failed.append(call_id)
+            raise RuntimeError("Cloud Tasks deadline exceeded")
+        return original(call_id, delay_s, sim)
+
+    sys.deps.queue.enqueue_call = fail_once
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    with pytest.raises(RuntimeError):
+        # Too soon: the first delivery may still be carrying it out; the event is asked to come back later.
+        handle_event(sys.deps, "m-2", "call.completed", completion(call, Answer.NEEDS_HELP))
+    sys.clock.advance(120)
+    handle_event(sys.deps, "m-3", "call.completed", completion(call, Answer.NEEDS_HELP))
+    neighbour_calls = [c for c in real_calls(sys) if c.target == Target.NEIGHBOR]
+    assert len(neighbour_calls) == 1
+    assert ("call", neighbour_calls[0].id) in [(t.kind, t.id) for t in sys.deps.queue.tasks]
+    assert "neighbor_called" in sent_keys(sys)
+
+
+def test_the_neighbour_is_queued_before_the_family_is_told_and_a_blocked_call_is_never_announced(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    seen = []
+    send = sys.deps.notifier.send
+
+    def notice(owner_uid, key, params, urgent):
+        seen.append((key, len([c for c in real_calls(sys) if c.target == Target.NEIGHBOR])))
+        return send(owner_uid, key, params, urgent)
+
+    sys.deps.notifier.send = notice
+    complete(sys, call, Answer.NEEDS_HELP)
+    assert seen[0] == ("call_unwell", 1)  # the neighbour's call was queued before the first notice
+
+    # The same, with calls stopped: the family is never told that a neighbour is being called.
+    sys2 = build_sys()
+    request_check(sys2)
+    sys2.deps.store.runtime.kill_switch = True
+    complete(sys2, only_new_call(sys2), Answer.NEEDS_HELP)
+    assert "neighbor_called" not in sent_keys(sys2) and "call_blocked" in sent_keys(sys2)
+
+
+def test_a_malformed_event_is_dropped_and_changes_nothing(sys):
+    ep_id = request_check(sys)
+    call = only_new_call(sys)
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.OK) | {"answer": "maybe"})
+    assert sys.deps.store.get_episode(ep_id).state == EpisodeState.CALLING_PERSON
+
+
+def test_a_night_introduction_whose_timer_failed_gets_it_when_the_request_comes_again(sys):
+    # 23:30 in Belgrade: the introduction waits for the morning, and its timer fails to queue once.
+    sys.clock.advance(int(13.5 * 3600))
+    original, failed = sys.deps.queue.enqueue_due, []
+
+    def fail_once(episode_id, at):
+        if not failed:
+            failed.append(episode_id)
+            raise RuntimeError("queue unavailable")
+        return original(episode_id, at)
+
+    sys.deps.queue.enqueue_due = fail_once
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "intro.requested", {"neighbor_id": "n1"})
+    handle_event(sys.deps, "m-1", "intro.requested", {"neighbor_id": "n1"})
+    assert [t.kind for t in sys.deps.queue.tasks] == ["due"]

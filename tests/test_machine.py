@@ -305,3 +305,11 @@ def test_a_number_the_network_refuses_is_reported_as_such_not_as_no_answer():
     for kind in (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR):  # no alarm: check the number
         _, acts = run(kind, [Due(), CallBlocked("refused")])
         assert acts[-2:] == [Notify("intro_refused", False), Close(Result.BLOCKED)], kind
+
+
+
+def test_a_blocked_heads_up_is_a_quiet_note_because_nothing_has_happened_yet():
+    from kuckuc.engine.machine import CallBlocked
+
+    ep, acts = run(EpisodeKind.HEADSUP, [Due(), CallBlocked("kill_switch")])
+    assert ep.result == Result.NOT_DELIVERED and Notify("headsup_blocked", False) in acts

@@ -95,6 +95,9 @@ def step(ep: Episode, ev: Input, neighbor_count: int) -> tuple[Episode, list[Act
         if ep.kind in (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR):
             # Nobody is waiting for help on an introduction: the family starts it again when they can.
             return _close(ep, Result.BLOCKED, [Notify("intro_blocked", urgent=False)])
+        if ep.kind == EpisodeKind.HEADSUP:
+            # The day before: nothing has happened yet, and tomorrow's check still comes.
+            return _close(ep, Result.NOT_DELIVERED, [Notify("headsup_blocked", urgent=False)])
         return _close(ep, Result.BLOCKED, [Notify("call_blocked", urgent=True)])
     if isinstance(ev, Due):
         return _start(ep) if ep.state == EpisodeState.SCHEDULED else (ep, [])

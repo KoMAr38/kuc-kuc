@@ -101,10 +101,11 @@ def test_github_link_appears_only_when_a_repository_is_set(web):
 def test_demo_script_explains_every_refusal_and_every_timeline_row():
     js = (WEB_DIR / "static" / "demo.js").read_text(encoding="utf-8")
     for code in ("bad_number", "country", "number_type", "phone_limit", "ip_limit", "budget", "ended", "low_balance",
-                 "wrong_code", "session", "verify_failed", "own_number"):  # fmt: skip
+                 "wrong_code", "session", "verify_failed", "own_number", "busy"):  # fmt: skip
         assert f"{code}:" in js, code
     for event in ("episode_started", "call_queued", "call_placed", "call_answered", "answer_interpreted",
-                  "family_notified", "episode_closed", "call_missed", "call_hung_up", "call_failed", "call_blocked"):  # fmt: skip
+                  "family_notified", "episode_closed", "call_missed", "call_hung_up", "call_failed", "call_blocked",
+                  "call_refused"):  # fmt: skip
         assert f"{event}:" in js, event
 
 

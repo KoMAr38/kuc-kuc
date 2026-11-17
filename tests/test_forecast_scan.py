@@ -100,7 +100,7 @@ def test_one_cell_failing_does_not_stop_the_others(deps):
         return load("openmeteo_cold.json")
 
     assert run_scan(deps, flaky) == 1
-    assert deps.store.alert_exists(f"{far.id}:cold:{TOMORROW}")
+    assert deps.store.get_alert(f"{far.id}:cold:{TOMORROW}") is not None
 
 
 def test_scan_only_looks_at_today_and_tomorrow_where_the_person_lives(deps):

@@ -34,6 +34,9 @@ DEMO_CALL_MINUTES = 4
 # The demo's day is Product Hunt's day: it starts at 00:01 in California.
 DEMO_DAY_ZONE = ZoneInfo("America/Los_Angeles")
 BALANCE_CACHE_S = 300
+# A balance that could not be read counts as none, and is asked for again after a minute: asking on
+# every request made each one wait for a provider that was down.
+FAILED_BALANCE_RETRY_S = 60
 
 
 class DemoRefused(Exception):
@@ -150,8 +153,13 @@ class CachedBalance:
     def balance_usd(self) -> float:
         now = self._clock.now()
         if self._balance is None or now - self._read_at >= timedelta(seconds=BALANCE_CACHE_S):
-            self._balance = self._inner.balance_usd()
-            self._read_at = now
+            try:
+                self._balance = self._inner.balance_usd()
+                self._read_at = now
+            except Exception as exc:
+                log.warning("balance unavailable (%s); counted as none for a minute", type(exc).__name__)
+                self._balance = 0.0
+                self._read_at = now - timedelta(seconds=BALANCE_CACHE_S - FAILED_BALANCE_RETRY_S)
         return self._balance
 
 

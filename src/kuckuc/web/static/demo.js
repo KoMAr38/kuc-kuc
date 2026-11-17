@@ -11,6 +11,7 @@
     phone_limit: "This number has had its two demo calls for today. Come back tomorrow.",
     ip_limit: "Too many tries from this network today. Come back tomorrow.",
     budget: "Today's demo budget is spent. Real calls cost real money.",
+    busy: "The demo is busy for a moment. Try again in a few seconds.",
     ended: "The live demo has ended.",
     low_balance: "The demo is paused so that calls to real people stay paid for.",
     wrong_code: "That code did not match. Check it and try again.",
@@ -48,7 +49,9 @@
     nobody_reachable: "URGENT: “No neighbour can be reached, and we do not know how she is. Check now.”",
     nobody_reachable_unwell: "URGENT: “She says she is not well, and no neighbour can be reached.”",
     neighbor_unconfirmed: "URGENT: “The neighbour went over but is no longer answering.”",
-    call_blocked: "URGENT: “The call could not be made, so we do not know how she is. Check now.”"
+    call_blocked: "URGENT: “The call could not be made, so we do not know how she is. Check now.”",
+    call_refused: "URGENT: “The phone network refused her number. Check it on your page.”",
+    neighbor_refused: "URGENT: “The phone network refused the neighbour's number. Check it on your page.”"
   };
 
   function who(p) {
@@ -92,6 +95,9 @@
     },
     call_blocked: function (p) {
       return ["Call blocked (" + (p.reason || "limit") + ")", "urgent"];
+    },
+    call_refused: function (p) {
+      return ["The phone network refused the number of " + who(p) + ": it never rang", "urgent"];
     }
   };
 
@@ -111,7 +117,7 @@
     return;
   }
 
-  var state = { token: null, episode: null, after: 0, timer: null, countdown: null, neighbourGoing: false };
+  var state = { token: null, episode: null, after: 0, timer: null, countdown: null, neighbourGoing: false, polling: false };
 
   function say(text, kind) {
     el.message.textContent = text || "";
@@ -242,11 +248,22 @@
   }
 
   function poll() {
+    // One question at a time: under load a reply can take longer than the interval, and two
+    // questions asked with the same "after" drew every row twice.
+    if (state.polling) {
+      return;
+    }
+    state.polling = true;
+    var episode = state.episode;
     var url =
-      "/api/demo/timeline/" + encodeURIComponent(state.episode) +
+      "/api/demo/timeline/" + encodeURIComponent(episode) +
       "?token=" + encodeURIComponent(state.token) + "&after=" + state.after;
     fetch(url)
       .then(function (response) {
+        state.polling = false;
+        if (episode !== state.episode) {
+          return null; // a late reply about an earlier run
+        }
         if (response.status === 401 || response.status === 403) {
           stopPolling();
           refuse("forbidden");
@@ -262,6 +279,9 @@
           return;
         }
         data.events.forEach(function (event) {
+          if (event.seq <= state.after) {
+            return; // already shown
+          }
           state.after = Math.max(state.after, event.seq);
           addRow(event);
           narrate(event);
@@ -276,7 +296,7 @@
         }
       })
       .catch(function () {
-        /* a missed poll is fine; the next one catches up */
+        state.polling = false; /* a missed poll is fine; the next one catches up */
       });
   }
 

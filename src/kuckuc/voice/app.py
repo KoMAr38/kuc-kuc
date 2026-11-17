@@ -62,11 +62,11 @@ def create_voice_app(
     ) -> bool:
         """Record the outcome and tell the engine, exactly once per call.
         The timeline row is written first, so it reads in order with what the engine does next.
-        When this try heard nothing, what an earlier try of the same call heard is kept."""
+        When this try kept no recording, the earlier try's recording and transcript are kept, as a pair."""
         stored = deps.store.get_call(call.id)
-        if stored is not None:
+        if stored is not None and recording_key is None:
             transcript = transcript or stored.transcript
-            recording_key = recording_key or stored.recording_key
+            recording_key = stored.recording_key
         if not deps.store.complete_call(call.id, answer, transcript, recording_key):
             return False
         if timeline:
@@ -83,6 +83,9 @@ def create_voice_app(
         )
         log.info("call %s finished: %s", call.id, answer.value)
         return True
+
+    def claim(call: CallRecord) -> bool:
+        return deps.store.start_dialing(call.id, deps.clock.now())
 
     def block(call: CallRecord, reason: str) -> None:
         deps.store.patch_call(call.id, status="blocked")
@@ -122,10 +125,16 @@ def create_voice_app(
         call = deps.store.get_call(call_id)
         if call is None or call.status != "queued":
             return {"ok": True, "skipped": True}
+        # Every way of ending this call starts by claiming it: a task delivered twice may be dialling
+        # on another server right now, and only the delivery that claims the call may end it.
         if deps.store.get_runtime().kill_switch:
+            if not claim(call):
+                return {"ok": True, "skipped": True}
             block(call, "kill_switch")
             return {"ok": True}
         if call.provider == "simulated":
+            if not claim(call):
+                return {"ok": True, "skipped": True}
             prepared = call.params.get("sim_answer", "")
             finish(call, Answer(prepared) if prepared in set(Answer) else Answer.UNCLEAR, None, None)
             return {"ok": True}
@@ -141,11 +150,13 @@ def create_voice_app(
         except Exception:
             # A passing failure: the call did not go through, and is tried again like any such call.
             log.exception("call %s: speech synthesis failed", call.id)
+            if not claim(call):
+                return {"ok": True, "skipped": True}
             finish(call, Answer.NO_ANSWER, None, None, ("call_failed", {"role": call.target.value}))
             return {"ok": True}
 
         # A task delivered twice (the queue retries when this takes long) must ring once.
-        if not deps.store.start_dialing(call.id, deps.clock.now()):
+        if not claim(call):
             return {"ok": True, "skipped": True}
 
         try:
@@ -172,9 +183,10 @@ def create_voice_app(
                 return {"ok": True}
             finish(call, Answer.NO_ANSWER, None, None, ("call_failed", {"role": call.target.value}))
             return {"ok": True}
-        deps.store.patch_call(call.id, status="placed", provider_sid=sid)  # placed_at was set on dialling
-        deps.store.add_timeline(call.episode_id, "call_placed", {"role": call.target.value})
-        log.info("call %s placed", call.id)
+        # Only a call still being dialled becomes "placed": a "busy" may have finished it already.
+        if deps.store.mark_placed(call.id, sid):
+            deps.store.add_timeline(call.episode_id, "call_placed", {"role": call.target.value})
+            log.info("call %s placed", call.id)
         return {"ok": True}
 
     @app.post("/twiml/{call_id}")
@@ -182,10 +194,14 @@ def create_voice_app(
         call = deps.store.get_call(call_id)
         if call is None:
             return _twiml("<Hangup/>")
+        if call.status in ("completed", "blocked"):
+            return goodbye(call, None)  # already ended here (for instance the dial timed out): nothing to ask
         try:
             opening = audio_url(render(call.script, call.lang, params_from_dict(call.params)), call)
         except Exception:
             log.exception("call %s: opening audio unavailable", call.id)
+            # Our failure, not a hang-up: say so, and let the check go on as for any unclear answer.
+            finish(call, Answer.UNCLEAR, None, None, ("call_failed", {"role": call.target.value}))
             return _twiml("<Hangup/>")
         deps.store.add_timeline(call.episode_id, "call_answered", {"role": call.target.value})
         log.info("call %s answered", call.id)
@@ -198,7 +214,10 @@ def create_voice_app(
         call = deps.store.get_call(call_id)
         if call is None:
             return _twiml("<Hangup/>")
+        recording_url = params.get("RecordingUrl", "")
         if call.status == "completed":
+            if recording_url:
+                background.add_task(deps.telephony.delete_recording, recording_url)  # nobody will need it
             return goodbye(call, None)
         if not deps.store.claim_recording(call.id, n):
             # The same answer reached another server too (the provider retried, for instance during a
@@ -207,15 +226,15 @@ def create_voice_app(
             return goodbye(call, None)
 
         answer, transcript, recording_key = Answer.UNCLEAR, "", None
+        if not empty and recording_url:
+            # The provider's copy goes once this reply is sent, whatever happens to ours below.
+            background.add_task(deps.telephony.delete_recording, recording_url)
         if not empty:
             try:
-                recording_url = params["RecordingUrl"]
                 wav = deps.telephony.fetch_recording(recording_url)
                 key = f"recordings/{call.id}-{n}.wav"
                 deps.blobs.put(key, wav, "audio/wav")
                 recording_key = key
-                # Our copy is stored; the provider's is deleted once the answer is handled and replied to.
-                background.add_task(deps.telephony.delete_recording, recording_url)
                 heard = deps.interpreter.interpret(wav, call.lang, call.question)
                 answer, transcript = heard.answer, heard.transcript
             except Exception as exc:
