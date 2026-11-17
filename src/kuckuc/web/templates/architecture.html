@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}How Kuc-kuc is built: three Cloud Run services that sleep until needed{% endblock %}
+{% set forecast = "forecast" in features %}
+{% set family = "family" in features %}
+{% set loadtest_on = "loadtest" in features %}
+{% block content %}
+<section class="hero arch-hero">
+  <p class="eyebrow">Architecture</p>
+  <h1>Three small services that sleep until someone needs them.</h1>
+  <p class="lede">
+    Dangerous weather is rare. On an ordinary day Kuc-kuc has nothing to do, so it runs nothing:
+    every part is on Cloud Run with a minimum of zero instances.
+    When a call has to be made, the parts wake up, hand the work to each other through a queue and a topic, and go back to sleep.
+  </p>
+</section>
+
+<section class="band" aria-labelledby="picture-title">
+  <h2 id="picture-title">The picture</h2>
+  <p>This page describes what is deployed right now, nothing more.</p>
+  <div class="diagram-scroll" tabindex="0" role="group" aria-label="Architecture diagram, scrollable">
+    {% include "_diagram.svg" %}
+  </div>
+  <p class="fine-print">
+    No service calls another service directly. Whatever happens is published as an event; whatever has to happen later is a task with a time on it.
+  </p>
+</section>
+
+<section aria-labelledby="day-title">
+  <h2 id="day-title">One check, step by step</h2>
+  <ol class="flow">
+    {% if forecast %}
+    <li><strong>The forecast crosses a threshold.</strong>
+      Every three hours Cloud Scheduler starts <code>forecast-scan</code>, a Cloud Run job. It groups the people under watch into cells of about 10 km,
+      asks Open-Meteo for 48 hours of forecast per cell, and publishes <code>alert.created</code> when heat, frost, wind or snow crosses its line.
+      The same alert is never created twice.</li>
+    {% else %}
+    <li><strong>A check is requested.</strong>
+      Today that happens when a visitor starts the demo on this site: <code>web</code> publishes <code>check.requested</code>.
+      The job that starts checks from the real forecast is not deployed yet, so it is not described here.</li>
+    {% endif %}
+    <li><strong>The engine decides.</strong>
+      Pub/Sub pushes every event to <code>engine</code>. All decisions live in one pure function,
+      <code>step(episode, event)</code>, which returns the episode as it is now plus a list of things to do. It has no clock and touches nothing outside itself,
+      so every rule of the service is a unit test.</li>
+    <li><strong>A call is queued, not made.</strong>
+      The engine writes a call record to Firestore and puts a task in the Cloud Tasks queue <code>calls</code>.
+      The queue releases at most one new call per second, whatever the backlog.</li>
+    <li><strong>The phone rings.</strong>
+      Cloud Tasks calls <code>voice</code> with an identity token. Before dialling, <code>voice</code> synthesises every sentence the call might need
+      with a Chirp 3 HD voice and stores the audio in Cloud Storage, so the person never waits in silence while speech is being made.
+      Then it asks Twilio to dial.</li>
+    <li><strong>A few seconds of answer.</strong>
+      The greeting plays, up to 8 seconds are recorded, and the recording goes to Gemini on Vertex AI: audio in, a small JSON object out
+      (is a live person speaking, what did they mean, what did they say). The recording is deleted at the phone company at once and kept in our bucket for 7 days.</li>
+    <li><strong>What happens next is another event.</strong>
+      <code>voice</code> publishes <code>call.completed</code>. “I am fine” closes the episode. No answer becomes a task ten minutes in the future, at most three times.
+      Anything else starts the neighbour chain, and the question “how is she?” twenty minutes later is, again, just a task with a time on it.</li>
+    {% if family %}
+    <li><strong>The family hears at every step.</strong>
+      The engine sends a Telegram message when an alert is created, after every call, when a neighbour is sent, and at the end.
+      Urgent ones say so in the first word.</li>
+    {% endif %}
+  </ol>
+</section>
+
+<section class="band" aria-labelledby="parts-title">
+  <h2 id="parts-title">The parts</h2>
+  <dl class="parts">
+    <dt><code>web</code> <span>Cloud Run service, public</span></dt>
+    <dd>This site and the demo API. It verifies a visitor's phone number, enforces the demo's limits, publishes one event, and serves the live timeline. It never dials.</dd>
+
+    <dt><code>engine</code> <span>Cloud Run service, private</span></dt>
+    <dd>The state machine. Internal ingress only: Pub/Sub and Cloud Tasks can reach it, the internet cannot.
+      It reads an event, runs <code>step</code> inside a Firestore transaction, then queues calls{% if family %} and sends notices{% endif %}.</dd>
+
+    <dt><code>voice</code> <span>Cloud Run service, reachable by the phone company</span></dt>
+    <dd>The only code that touches telephony. Every webhook is checked against Twilio's signature; the request that starts a call must carry
+      a Google identity token from our own queue. It is the one place that holds the phone credentials.</dd>
+
+    {% if forecast %}
+    <dt><code>forecast-scan</code> <span>Cloud Run job</span></dt>
+    <dd>Runs for a few seconds every three hours, started by Cloud Scheduler, and exits.</dd>
+    {% endif %}
+    <dt><code>watchdog</code> <span>Cloud Run job</span></dt>
+    <dd>Every ten minutes, a few seconds long. Any message or timer can be lost on the way; a check that has stopped moving is closed and the family is told at once,
+      instead of waiting in silence for a neighbour nobody called.</dd>
+    {% if loadtest_on %}
+    <dt><code>loadtest</code> <span>Cloud Run job</span></dt>
+    <dd>Creates thousands of simulated people in a heatwave and lets the real engine and the real queues handle them, with telephony replaced by a simulation.
+      Its numbers are below.</dd>
+    {% endif %}
+
+    <dt>Pub/Sub <span>topic <code>events</code></span></dt>
+    <dd>Everything that happens: <code>check.requested</code>, <code>call.completed</code>, <code>call.blocked</code>{% if forecast %}, <code>alert.created</code>{% endif %}.
+      Delivery can repeat, so each episode remembers the events it has already handled and each call can be completed only once.</dd>
+
+    <dt>Cloud Tasks <span>queues <code>calls</code>, <code>timers</code></span></dt>
+    <dd>Every wait in the system. “Call again in 10 minutes” and “ask the neighbour in 20” are tasks, not sleeping processes. This is what lets every service scale to zero in the middle of an escalation.</dd>
+
+    <dt>Firestore</dt>
+    <dd>People, episodes, calls and the timeline. Demo data carries an expiry and deletes itself after 24 hours.</dd>
+
+    <dt>Cloud Storage</dt>
+    <dd>Synthesised speech, cached by content, and recorded answers, deleted after 7 days by a lifecycle rule.</dd>
+
+    <dt>Vertex AI and Text-to-Speech</dt>
+    <dd>Gemini listens to the recorded answer; a Chirp 3 HD voice speaks, in Serbian or English.</dd>
+
+    <dt>Secret Manager</dt>
+    <dd>Phone credentials. Each service has its own service account and can read only the secrets its code uses.</dd>
+  </dl>
+</section>
+
+<section aria-labelledby="zero-title">
+  <h2 id="zero-title">Why scale to zero matters here</h2>
+  <p>
+    A service like this is needed on perhaps eight days a year per person. If it cost money on the other 357, nobody's family could keep it running.
+    So the design rule was: <strong>nothing may need to stay awake.</strong>
+  </p>
+  <ul class="plain">
+    <li>Waiting is stored, not held. A retry or a follow-up is a Cloud Tasks task with a delivery time. The service that will handle it can be at zero instances until that moment.</li>
+    <li>State lives in Firestore, never in memory. Any instance can pick up any step.</li>
+    <li>Cold starts are paid where nobody is listening. Starting a call from zero takes about twelve seconds, and all of it happens before the phone rings.
+      Once someone has picked up, the slowest step, understanding their answer, takes about three seconds.</li>
+    <li>The queue protects the phone line. However many alerts arrive at once, calls leave at a fixed, gentle rate.</li>
+  </ul>
+</section>
+
+<section class="band" aria-labelledby="safe-title">
+  <h2 id="safe-title">What keeps it safe</h2>
+  <ul class="plain">
+    <li><strong>One rule above the others: any doubt counts as a problem.</strong> Silence, a recorded message, a failed download, a model error or a confused answer is “unclear”, and unclear sends someone to the door. It is never “fine”.</li>
+    <li>At most 6 calls a day to any one person, checked before the first call of a check; an escalation that has started is never cut off by it. One switch stops all new calls. Whenever a real call is blocked, the family gets an urgent message.</li>
+    <li>A watchdog every ten minutes: a check that has stopped moving is closed and the family hears about it at once. A message that did not reach the family is shown as not delivered.</li>
+    <li>The demo only calls a number its owner has just verified, in four countries, a few times a day, within a daily budget in dollars. Its limits never block a call to a real person.</li>
+    <li>Phone numbers never appear in logs, on public pages or in the repository.</li>
+    <li>It is <strong>not an emergency service</strong>, and says so wherever it speaks.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="cost-title">
+  <h2 id="cost-title">What it costs</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Item</th><th scope="col">Cost</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Google Cloud on a quiet day</th><td>about nothing: zero instances</td></tr>
+        <tr><th scope="row">One phone number</th><td>about $1.15 a month</td></tr>
+        <tr><th scope="row">A call to a landline in Serbia</th><td>$0.60 a minute</td></tr>
+        <tr><th scope="row">One dangerous day for one person</th><td>about $1.20; about $1.60 more if a neighbour is called</td></tr>
+        <tr><th scope="row">One person for a year, about 8 such days</th><td>$10 to $15</td></tr>
+        <tr><th scope="row">One run of this demo</th><td>about 9 cents</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine-print">Telephony is nearly the whole bill. A local carrier would cut it several times over; that is for later.</p>
+</section>
+
+<section class="band" aria-labelledby="now-title">
+  <h2 id="now-title">Right now</h2>
+  <dl class="counters">
+    <div><dt>Calls today</dt><dd id="stat-calls-today">{{ stats.calls_today }}</dd></div>
+    <div><dt>Calls so far</dt><dd id="stat-calls-total">{{ stats.calls_total }}</dd></div>
+    <div><dt>People under watch</dt><dd id="stat-persons-active">{{ stats.persons_active }}</dd></div>
+  </dl>
+  {% if loadtest_on and loadtest %}
+  <h3>Under load</h3>
+  <p>
+    The latest load test simulated <strong>{{ loadtest.n }}</strong> people in a heatwave at once.
+    The engine and the queues handled <strong>{{ loadtest.calls }}</strong> simulated calls and closed every episode in
+    <strong>{{ loadtest.seconds }}</strong> seconds{% if loadtest.peak_instances %}, at a peak of <strong>{{ loadtest.peak_instances }}</strong> instances{% endif %}.
+    Then everything went back to zero.
+  </p>
+  {% endif %}
+  <p><a class="button" href="/#demo">Try it on your phone</a></p>
+</section>
+{% endblock %}

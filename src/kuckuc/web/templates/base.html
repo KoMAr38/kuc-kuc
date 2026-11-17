@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Kuc-kuc: a knock on the door when dangerous weather comes{% endblock %}</title>
+  <meta name="description" content="When dangerous weather is forecast, Kuc-kuc phones an older person who lives alone. If they do not answer, it phones a neighbour to knock on the door.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="/static/app.css?v={{ v }}">
+  <link rel="icon" href="/static/door.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="wordmark" href="/" aria-label="Kuc-kuc, home">
+      <svg class="knock" viewBox="0 0 44 32" aria-hidden="true" focusable="false">
+        <rect x="2" y="3" width="17" height="26" rx="2"/>
+        <circle cx="14.5" cy="17" r="1.4"/>
+        <path d="M25 11c2.4 3 2.4 7 0 10M30.5 8c4 5 4 11 0 16M36 5c5.6 7 5.6 15 0 22"/>
+      </svg>
+      <span>Kuc-kuc</span>
+    </a>
+    <nav aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/#demo">Try it</a>
+      <a href="/architecture">Architecture</a>
+      {% if "family" in features and signed_in %}<a href="/family">Family</a>{% endif %}
+      {% if github_url %}<a href="{{ github_url }}">GitHub</a>{% endif %}
+    </nav>
+  </header>
+
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <p><strong>This is not an emergency service.</strong> In an emergency, call your local emergency number.</p>
+    <p>
+      Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0).
+      Built on Google Cloud Run for the Product Hunt hackathon, “Build for Good”.
+      <a href="/architecture">How it is built</a>{% if github_url %} · <a href="{{ github_url }}">Source on GitHub</a>{% endif %}
+    </p>
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

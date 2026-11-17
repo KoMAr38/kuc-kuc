@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kuckuc"
+version = "0.1.0"
+description = "A knock on the door when dangerous weather comes."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "jinja2>=3.1",
+  "python-multipart>=0.0.9",
+  "httpx>=0.27",
+  "itsdangerous>=2.2",
+  "phonenumbers>=8.13",
+  "tzdata>=2024.1",
+  "timezonefinder>=6.5",
+  "twilio>=9.0",
+  "google-auth>=2.29",
+  "google-cloud-firestore>=2.16",
+  "google-cloud-pubsub>=2.21",
+  "google-cloud-tasks>=2.16",
+  "google-cloud-storage>=2.16",
+  "google-cloud-texttospeech>=2.16",
+  "google-genai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kuckuc = ["web/templates/*", "web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

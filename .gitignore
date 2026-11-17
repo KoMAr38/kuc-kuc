@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.env
+samples/
+.superpowers/
+.claude/
+# Real names and places the page tests look for; never committed.
+tests/private_words.txt

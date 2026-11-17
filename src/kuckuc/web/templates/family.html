@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Kuc-kuc: your page{% endblock %}
+{% block content %}
+<section id="family-app" class="family" data-client-id="{{ google_client_id }}">
+  <div class="family-top">
+    <h1 data-t="title">Your page</h1>
+    <p class="lang-toggle">
+      <button type="button" class="link-button" data-lang="sr">Srpski</button>
+      <button type="button" class="link-button" data-lang="en">English</button>
+    </p>
+  </div>
+
+  <div id="signed-out" hidden>
+    <p class="lede" data-t="intro">Sign in to see the people you look after.</p>
+    {% if google_client_id %}
+    <div id="google-button"></div>
+    <p class="fine-print" data-t="invite_only">Kuc-kuc is a pilot by invitation: only families who have been invited can sign in.</p>
+    {% elif local_sign_in %}
+    <form id="local-sign-in" class="demo-step" novalidate>
+      <label for="local-email" data-t="local_note">Local preview: type any email.</label>
+      <div class="row">
+        <input id="local-email" type="text" inputmode="email" autocomplete="email" placeholder="you@example.com" required>
+        <button class="button" type="submit" data-t="sign_in">Sign in</button>
+      </div>
+    </form>
+    {% else %}
+    <p id="sign-in-off" class="fine-print" data-t="sign_in_off">Sign-in is not switched on yet.</p>
+    {% endif %}
+  </div>
+
+  <div id="signed-in" hidden>
+    <p class="fine-print"><span data-t="signed_in_as">Signed in as</span> <strong id="me-email"></strong> ·
+      <button type="button" class="link-button" id="sign-out" data-t="sign_out">Sign out</button></p>
+
+    <div class="card" id="telegram-card">
+      <h2 data-t="telegram_title">Notifications</h2>
+      <p id="telegram-state"></p>
+    </div>
+
+    <h2 data-t="people_title">People</h2>
+    <p id="family-message" class="demo-message" role="status" aria-live="polite"></p>
+    <div id="people"></div>
+
+    <details class="card add-person" id="add-person">
+      <summary data-t="add_title">Add a person</summary>
+      <form id="enrol-form" novalidate>
+        <p class="fine-print" data-t="consent_note">Right after enrolment we call the person and each neighbour with an introduction. Without a spoken “yes” there are no further calls.</p>
+        <label><span data-t="f_invite">Invite code</span><input name="invite_code" type="text" autocomplete="off" required></label>
+        <label><span data-t="f_name">Name as spoken in the call</span><input name="name" type="text" maxlength="60" required></label>
+        <label><span data-t="f_family">Who turned the service on, as said to them</span><input name="family_name" type="text" maxlength="80" required></label>
+        <fieldset>
+          <legend data-t="f_gender">Gender</legend>
+          <label class="inline"><input type="radio" name="gender" value="f" checked> <span data-t="female">female</span></label>
+          <label class="inline"><input type="radio" name="gender" value="m"> <span data-t="male">male</span></label>
+        </fieldset>
+        <label><span data-t="f_phone">Phone (landline or mobile)</span><input name="phone" type="tel" autocomplete="off" required></label>
+        <fieldset>
+          <legend data-t="f_lang">Language of the call</legend>
+          <label class="inline"><input type="radio" name="lang" value="sr" checked> Srpski</label>
+          <label class="inline"><input type="radio" name="lang" value="en"> English</label>
+        </fieldset>
+        <label><span data-t="f_place">Place (village or town only, no street)</span>
+          <input id="place-search" type="text" autocomplete="off" required></label>
+        <ul id="place-results" class="place-results" aria-live="polite"></ul>
+        <fieldset id="neighbors">
+          <legend data-t="f_neighbors">Neighbours we may call (three at most)</legend>
+          <div id="neighbor-rows"></div>
+          <button type="button" class="link-button" id="add-neighbor" data-t="add_neighbor">Add a neighbour</button>
+        </fieldset>
+        <p><button class="button" type="submit" data-t="submit">Enrol and call for consent</button></p>
+      </form>
+    </details>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+{% if google_client_id %}<script src="https://accounts.google.com/gsi/client" async defer></script>{% endif %}
+<script src="/static/family.js?v={{ v }}" defer></script>
+{% endblock %}

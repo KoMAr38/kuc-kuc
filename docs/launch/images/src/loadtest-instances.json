@@ -1,0 +1,162 @@
+[
+ {
+  "minute": "20:51",
+  "active": 0,
+  "idle": 2
+ },
+ {
+  "minute": "20:52",
+  "active": 1,
+  "idle": 2
+ },
+ {
+  "minute": "20:53",
+  "active": 1,
+  "idle": 1
+ },
+ {
+  "minute": "20:54",
+  "active": 0,
+  "idle": 2
+ },
+ {
+  "minute": "20:55",
+  "active": 14,
+  "idle": 0
+ },
+ {
+  "minute": "20:56",
+  "active": 8,
+  "idle": 5
+ },
+ {
+  "minute": "20:57",
+  "active": 4,
+  "idle": 8
+ },
+ {
+  "minute": "20:58",
+  "active": 4,
+  "idle": 9
+ },
+ {
+  "minute": "20:59",
+  "active": 5,
+  "idle": 8
+ },
+ {
+  "minute": "21:00",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:01",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:02",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:03",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:04",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:05",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:06",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:07",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:08",
+  "active": 0,
+  "idle": 13
+ },
+ {
+  "minute": "21:09",
+  "active": 0,
+  "idle": 12
+ },
+ {
+  "minute": "21:10",
+  "active": 0,
+  "idle": 3
+ },
+ {
+  "minute": "21:11",
+  "active": 0,
+  "idle": 3
+ },
+ {
+  "minute": "21:12",
+  "active": 0,
+  "idle": 3
+ },
+ {
+  "minute": "21:13",
+  "active": 0,
+  "idle": 1
+ },
+ {
+  "minute": "21:14",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:15",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:16",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:17",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:18",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:19",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:20",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:21",
+  "active": 0,
+  "idle": 0
+ },
+ {
+  "minute": "21:22",
+  "active": 0,
+  "idle": 0
+ }
+]

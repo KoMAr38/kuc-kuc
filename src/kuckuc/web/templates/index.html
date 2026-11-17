@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">“Kuc-kuc” is Serbian for “knock-knock”</p>
+  <h1>A knock on the door when dangerous weather comes.</h1>
+  <p class="lede">
+    My grandmother lives alone in a village in southern Serbia. She has a landline, no smartphone,
+    and a neighbour across the road.
+  </p>
+  <p class="lede">
+    When a heatwave or a hard frost is forecast, Kuc-kuc phones her and asks if she is all right.
+    If she does not answer, or says she is not well, it phones the neighbour and asks him to knock on her door.
+    I am far away, and I see all of it as it happens.
+  </p>
+  <p class="actions">
+    <a class="button" href="#demo">Try it on your phone</a>
+    <a class="quiet-link" href="#how">How it works</a>
+  </p>
+</section>
+
+<section id="how" class="band" aria-labelledby="how-title">
+  <h2 id="how-title">How it works</h2>
+  <ol class="steps">
+    <li>
+      <h3>The forecast crosses a line</h3>
+      <p>Every three hours the forecast for her village is checked: heat that feels like 35 °C or more,
+        frost of −10 °C or lower, gusts over 80 km/h, or 20 cm of snow in a day.</p>
+    </li>
+    <li>
+      <h3>Her phone rings</h3>
+      <p>A calm voice, in her language, says what is coming and asks: are you all right?
+        She just answers out loud. No app, no smartphone, no buttons to press.
+        Her few seconds of answer are understood by Gemini.</p>
+    </li>
+    <li>
+      <h3>A neighbour knocks</h3>
+      <p>No answer after three tries, an unclear answer, or “I am not well”: the neighbour's phone rings.
+        Twenty minutes later he is asked how she is. The family gets a message at every step.</p>
+    </li>
+  </ol>
+  <p class="principle">One rule decides everything: <strong>any doubt counts as a problem.</strong>
+    Silence, a wrong number, a failed call or a confused answer never becomes “she is fine”.</p>
+</section>
+
+<section id="demo" class="demo" aria-labelledby="demo-title">
+  <h2 id="demo-title">Try it on your phone</h2>
+  <p>
+    You play the grandmother. Kuc-kuc calls your phone with the English version of the same call
+    and shows, live, what it does with your answer. Answer “I'm fine”, say you feel unwell, or do not pick up at all.
+    If you do not pick up, it tries twice more and then calls you again, this time as the neighbour.
+    (For the demo the waits are seconds. For a real person they are ten and twenty minutes.)
+  </p>
+
+  <form id="demo-phone-form" class="demo-step" novalidate>
+    <label for="demo-phone">1. Your phone number, with country code</label>
+    <div class="row">
+      <input id="demo-phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="+1 415 555 0100" required>
+      <button id="demo-send" class="button" type="submit">Send me a code</button>
+    </div>
+    <fieldset class="channel">
+      <legend class="visually-hidden">How to get the code</legend>
+      <label><input type="radio" name="channel" value="sms" checked> by text message</label>
+      <label><input type="radio" name="channel" value="call"> by phone call</label>
+    </fieldset>
+    <p class="fine-print">
+      The code proves the number is yours, so nobody can make this call anyone else.
+      The demo calls numbers in the United States, Canada, the United Kingdom and Norway,
+      at most twice a day per number. Your number is deleted within two days, and the
+      recording of your answer after seven days. Twilio, the phone company we use, keeps its own record of the call.
+    </p>
+  </form>
+
+  <form id="demo-code-form" class="demo-step" hidden novalidate>
+    <label for="demo-code">2. The code you received</label>
+    <div class="row">
+      <input id="demo-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" required>
+      <button id="demo-verify" class="button" type="submit">Verify</button>
+    </div>
+  </form>
+
+  <div id="demo-scenarios" class="demo-step" hidden>
+    <p class="step-label">3. Pick the weather. Your phone rings in about 15 seconds.</p>
+    <div class="row">
+      <button class="button" type="button" data-scenario="heat">Heatwave tomorrow</button>
+      <button class="button" type="button" data-scenario="cold">Cold snap tomorrow</button>
+    </div>
+  </div>
+
+  <p id="demo-message" class="demo-message" role="status" aria-live="polite"></p>
+
+  <div id="demo-sample" class="demo-sample" hidden>
+    <p>Here is a recording of the same call instead:</p>
+    <audio controls preload="none" src="/static/sample-call.mp3"></audio>
+  </div>
+
+  <ol id="demo-timeline" class="timeline" aria-live="polite" aria-label="What the system is doing"></ol>
+</section>
+
+<section class="band closing" aria-labelledby="who-title">
+  <h2 id="who-title">Who it is for</h2>
+  <p>
+    For the people a smartphone app will never reach: an older person on a landline, in a place where the nearest
+    family is hours away and the nearest help is the house across the road.
+    It is a small pilot, by invitation, and <strong>it is not an emergency service.</strong>
+  </p>
+  <p><a class="quiet-link" href="/architecture">See how it is built, what it costs and what it does when nobody needs it: nothing.</a></p>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/demo.js?v={{ v }}" defer></script>{% endblock %}

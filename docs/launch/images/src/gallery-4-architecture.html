@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1270, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Kuc-kuc — architecture</title>
+<style>
+:root {
+  --paper: #f7f3ec;
+  --card: #fffdf9;
+  --ink: #1d2528;
+  --muted: #586367;
+  --line: #ddd5c8;
+  --accent: #a8432a;
+  --accent-strong: #8a3520;
+  --on-accent: #fffaf5;
+  --ok: #256b4a;
+  --urgent: #a02a1c;
+  --focus: #1a5fb4;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+  --measure: 40rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #14181a;
+    --card: #1b2124;
+    --ink: #ece7de;
+    --muted: #a6afb2;
+    --line: #2e3639;
+    --accent: #e58a6f;
+    --accent-strong: #f0a18a;
+    --on-accent: #1a0f0b;
+    --ok: #7fc8a3;
+    --urgent: #ff9d8a;
+    --focus: #8ab4f8;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 1.0625rem/1.6 var(--sans);
+}
+
+a {
+  color: var(--accent-strong);
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--serif);
+  font-weight: 600;
+  line-height: 1.15;
+  text-wrap: balance;
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(2.1rem, 6.2vw, 3.6rem);
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: clamp(1.5rem, 3.6vw, 2rem);
+  margin-bottom: 1rem;
+}
+
+h3 {
+  font-size: 1.2rem;
+  margin-bottom: 0.35rem;
+}
+
+p {
+  margin: 0 0 1rem;
+  max-width: var(--measure);
+}
+
+.skip {
+  position: absolute;
+  left: -100rem;
+}
+
+.skip:focus {
+  left: 1rem;
+  top: 1rem;
+  background: var(--card);
+  padding: 0.5rem 0.75rem;
+  z-index: 10;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Header */
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1.5rem;
+  padding: 1rem clamp(1rem, 5vw, 3rem);
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink);
+  text-decoration: none;
+  font: 600 1.35rem/1 var(--serif);
+}
+
+.knock {
+  width: 2.3rem;
+  height: 1.7rem;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.knock circle {
+  fill: var(--accent);
+}
+
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  font-size: 0.98rem;
+}
+
+.site-header nav a {
+  color: var(--ink);
+  text-decoration: none;
+  padding: 0.35rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.site-header nav a:hover {
+  border-bottom-color: var(--accent);
+}
+
+/* Sections */
+main > section {
+  padding: clamp(2.25rem, 7vw, 4.5rem) clamp(1rem, 5vw, 3rem);
+}
+
+main > section > * {
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 52rem;
+}
+
+.hero {
+  padding-top: clamp(2.5rem, 9vw, 6rem);
+}
+
+.eyebrow {
+  color: var(--accent-strong);
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  margin-bottom: 0.9rem;
+  max-width: 52rem;
+}
+
+.hero h1 {
+  margin-bottom: 1.5rem;
+}
+
+.lede {
+  font-size: clamp(1.1rem, 2.3vw, 1.28rem);
+  max-width: 52rem;
+}
+
+.hero .lede {
+  max-width: 43rem;
+  margin-left: max(0px, calc((100% - 52rem) / 2));
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.9rem 1.5rem;
+  margin-top: 1.75rem;
+  max-width: 52rem;
+}
+
+.button {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 0;
+  border-radius: 0.6rem;
+  padding: 0.8rem 1.25rem;
+  font: 600 1.02rem/1.2 var(--sans);
+  text-decoration: none;
+  cursor: pointer;
+  min-height: 2.9rem;
+}
+
+.button:hover {
+  background: var(--accent-strong);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.quiet-link {
+  color: var(--ink);
+}
+
+.band {
+  background: var(--card);
+  border-block: 1px solid var(--line);
+}
+
+.steps {
+  list-style: none;
+  counter-reset: step;
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  padding: 0;
+  margin-top: 0;
+  margin-bottom: 1.75rem;
+}
+
+.steps li {
+  counter-increment: step;
+  border-top: 3px solid var(--accent);
+  padding-top: 0.9rem;
+}
+
+.steps li::before {
+  content: counter(step);
+  display: block;
+  font: 600 0.95rem/1 var(--mono);
+  color: var(--accent-strong);
+  margin-bottom: 0.5rem;
+}
+
+.steps p {
+  color: var(--muted);
+  margin: 0;
+}
+
+.principle {
+  border-left: 3px solid var(--accent);
+  padding: 0.25rem 0 0.25rem 1rem;
+  max-width: 52rem;
+}
+
+/* Demo */
+.demo-step {
+  margin-top: 1.5rem;
+}
+
+.demo-step label,
+.step-label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.45rem;
+  max-width: 52rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.demo input[type="tel"],
+.demo input[type="text"] {
+  flex: 1 1 14rem;
+  min-width: 0;
+  max-width: 22rem;
+  min-height: 2.9rem;
+  padding: 0.6rem 0.8rem;
+  font: 1.1rem/1.2 var(--mono);
+  color: var(--ink);
+  background: var(--card);
+  border: 1.5px solid var(--muted);
+  border-radius: 0.6rem;
+}
+
+.channel {
+  border: 0;
+  padding: 0;
+  margin: 0.7rem auto 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1.25rem;
+}
+
+.channel label {
+  font-weight: 400;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+}
+
+.fine-print {
+  color: var(--muted);
+  font-size: 0.93rem;
+  margin-top: 0.8rem;
+}
+
+.demo-message {
+  min-height: 1.6rem;
+  margin-top: 1.25rem;
+  font-weight: 600;
+  max-width: 52rem;
+}
+
+.demo-message[data-kind="error"] {
+  color: var(--urgent);
+}
+
+.demo-sample audio {
+  width: min(100%, 26rem);
+}
+
+.timeline {
+  list-style: none;
+  padding: 0;
+  margin-top: 1rem;
+  border-left: 2px solid var(--line);
+}
+
+.timeline:empty {
+  display: none;
+}
+
+.timeline li {
+  position: relative;
+  padding: 0.5rem 0 0.5rem 1.25rem;
+  display: grid;
+  grid-template-columns: 4.6rem 1fr;
+  gap: 0.75rem;
+  align-items: baseline;
+  animation: arrive 0.35s ease-out;
+}
+
+.timeline li::before {
+  content: "";
+  position: absolute;
+  left: -0.42rem;
+  top: 1.05rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--paper);
+}
+
+.timeline time {
+  font: 0.86rem/1.4 var(--mono);
+  color: var(--muted);
+}
+
+.timeline li[data-tone="ok"]::before {
+  background: var(--ok);
+}
+
+.timeline li[data-tone="ok"] span {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.timeline li[data-tone="urgent"]::before {
+  background: var(--urgent);
+}
+
+.timeline li[data-tone="urgent"] span {
+  color: var(--urgent);
+  font-weight: 600;
+}
+
+.timeline li[data-tone="quiet"] span {
+  color: var(--muted);
+}
+
+@keyframes arrive {
+  from {
+    opacity: 0;
+    transform: translateY(0.3rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.closing p {
+  font-size: 1.1rem;
+}
+
+/* Footer */
+.site-footer {
+  padding: 2rem clamp(1rem, 5vw, 3rem) 3rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.site-footer p {
+  max-width: 52rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.site-footer strong {
+  color: var(--ink);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* Architecture page */
+.arch-hero h1 {
+  font-size: clamp(1.9rem, 5vw, 3rem);
+}
+
+.diagram-scroll {
+  overflow-x: auto;
+  max-width: 62rem;
+  border-radius: 0.9rem;
+}
+
+.diagram {
+  display: block;
+  width: 100%;
+  min-width: 46rem;
+  height: auto;
+}
+
+code {
+  font: 0.92em/1.3 var(--mono);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  padding: 0.08em 0.32em;
+  border-radius: 0.3rem;
+  white-space: nowrap;
+}
+
+.flow {
+  padding-left: 1.3rem;
+  max-width: 46rem;
+}
+
+.flow li {
+  margin-bottom: 0.9rem;
+  padding-left: 0.3rem;
+}
+
+.flow li::marker {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.parts {
+  max-width: 46rem;
+}
+
+.parts dt {
+  font-weight: 700;
+  margin-top: 1.1rem;
+}
+
+.parts dt span {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 0.93rem;
+  margin-left: 0.4rem;
+}
+
+.parts dd {
+  margin: 0.2rem 0 0;
+}
+
+.plain {
+  max-width: 46rem;
+  padding-left: 1.2rem;
+}
+
+.plain li {
+  margin-bottom: 0.6rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  max-width: 46rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 0.8rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.6rem 0.9rem 0.6rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+thead th {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+tbody th {
+  font-weight: 400;
+}
+
+tbody td {
+  font-weight: 600;
+}
+
+.counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem 3rem;
+  margin-top: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.counters dt {
+  color: var(--muted);
+  font-size: 0.93rem;
+}
+
+.counters dd {
+  margin: 0;
+  font: 600 2.2rem/1.15 var(--serif);
+}
+
+
+/* Fixed Product Hunt composition. Original site stylesheet is embedded above. */
+:root {color-scheme: light; --paper:#f7f3ec; --card:#fffdf9; --ink:#1d2528; --muted:#586367; --line:#ddd5c8; --accent:#a8432a; --ok:#256b4a;}
+html,body {width:1270px;height:760px;margin:0;overflow:hidden;}
+body {position:relative;background:var(--paper);color:var(--ink);font-family:var(--sans);}
+* {animation:none!important;transition:none!important;}
+.brand {position:absolute;left:64px;top:64px;height:32px;display:flex;align-items:center;gap:12px;font:600 28px/32px var(--serif);}
+.brand svg {display:block;width:44px;height:32px;flex:none;}
+h1 {position:absolute;left:64px;top:137px;width:1142px;font:600 44px/1.12 var(--serif);letter-spacing:-.01em;text-wrap:nowrap;}
+.architecture {position:absolute;left:64px;top:218px;width:1142px;height:413px;}
+.architecture .wires {position:absolute;inset:0;width:1142px;height:413px;overflow:visible;z-index:0;}
+.group-label {position:absolute;margin:0;color:var(--muted);font:600 15px/20px var(--sans);letter-spacing:.025em;}
+.jobs-label {top:0;left:0;}
+.services-label {top:0;left:286px;}
+.node {position:absolute;z-index:1;background:var(--card);border:1px solid var(--line);border-radius:10px;}
+.node p {max-width:none;margin:0;}
+.top-node {top:32px;height:104px;padding:10px 19px;display:flex;flex-direction:column;justify-content:center;}
+.jobs {left:0;width:246px;gap:9px;font:17px/1.25 var(--sans);}
+.jobs p {white-space:nowrap;}
+.service {width:264px;border-top:3px solid var(--accent);font:18px/1.28 var(--sans);}
+.web {left:286px;}
+.engine {left:582px;}
+.voice {left:878px;}
+.service strong {font-size:22px;font-weight:600;display:block;margin-bottom:3px;}
+.service .detail {color:var(--muted);}
+.coordinator {top:176px;height:64px;padding:12px 19px;display:flex;align-items:center;font:18px/1.32 var(--sans);}
+.events {left:0;width:246px;}
+.waits {left:286px;width:816px;}
+.coordinator strong {font-weight:600;color:var(--accent);}
+.waits p {max-width:800px;}
+.data-label {top:262px;left:0;}
+.ai-label {top:262px;left:276px;}
+.outside-label {top:262px;left:764px;}
+.support {top:288px;height:125px;padding:16px 19px;font:18px/1.35 var(--sans);display:flex;flex-direction:column;justify-content:center;gap:10px;}
+.data {left:0;width:244px;}
+.ai {left:276px;width:456px;}
+.outside {left:764px;width:378px;font-size:17.5px;gap:7px;}
+.support strong {font-weight:600;}
+.caption {position:absolute;left:64px;bottom:64px;width:1142px;max-width:none;margin:0;font:400 20px/1.4 var(--sans);color:var(--muted);}
+</style>
+</head>
+<body>
+<header class="brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 32" fill="none" stroke="#a8432a" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="2" y="3" width="17" height="26" rx="2"/>
+  <circle cx="14.5" cy="17" r="1.4" fill="#a8432a"/>
+  <path d="M25 11c2.4 3 2.4 7 0 10M30.5 8c4 5 4 11 0 16M36 5c5.6 7 5.6 15 0 22"/>
+</svg><span>Kuc-kuc</span></header>
+<h1>Three services that sleep until they are needed</h1>
+<div class="architecture" aria-label="Architecture diagram">
+  <svg class="wires" viewBox="0 0 1142 413" fill="none" aria-hidden="true">
+    <defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M1 1 L6 3.5 L1 6" stroke="#a8432a" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+    <g stroke="#a8432a" stroke-width="1.5" stroke-linejoin="round">
+      <!-- No service calls another directly. What happened goes to Pub/Sub, which pushes it to
+           the engine; what has to happen later goes to Cloud Tasks, which calls voice. -->
+      <path d="M123 136V176" marker-end="url(#arrow)"/>
+      <path d="M316 136V150H206V176" marker-end="url(#arrow)"/>
+      <path d="M246 208H266V162H640V136" marker-end="url(#arrow)"/>
+      <path d="M714 136V176" marker-end="url(#arrow)"/>
+      <path d="M940 176V136" marker-end="url(#arrow)"/>
+      <!-- What the services lean on: storage, speech and the outside world. -->
+      <path d="M1122 136V254H122V288" marker-end="url(#arrow)"/>
+      <path d="M504 254V288" marker-end="url(#arrow)"/>
+      <path d="M953 254V288" marker-end="url(#arrow)"/>
+    </g>
+  </svg>
+  <h2 class="group-label jobs-label">Cloud Run jobs</h2>
+  <h2 class="group-label services-label">Cloud Run services</h2>
+  <div class="node top-node jobs"><p>forecast-scan (every 3 h)</p><p>loadtest</p></div>
+  <div class="node top-node service web"><p><strong>web</strong> <span class="detail">(public)</span></p></div>
+  <div class="node top-node service engine"><p><strong>engine</strong> <span class="detail">(private, one state machine)</span></p></div>
+  <div class="node top-node service voice"><p><strong>voice</strong> <span class="detail">(talks to the phone network)</span></p></div>
+  <div class="node coordinator events"><p><strong>Pub/Sub:</strong> events</p></div>
+  <div class="node coordinator waits"><p><strong>Cloud Tasks:</strong> every wait (call again in 10 min, ask the neighbour in 20)</p></div>
+  <h2 class="group-label data-label">Data</h2>
+  <h2 class="group-label ai-label">AI</h2>
+  <h2 class="group-label outside-label">Outside</h2>
+  <div class="node support data"><p>Firestore</p><p>Cloud Storage</p></div>
+  <div class="node support ai"><p><strong>Vertex AI Gemini:</strong> understands the spoken answer</p><p><strong>Chirp 3 HD:</strong> the voice</p></div>
+  <div class="node support outside"><p><strong>Twilio:</strong> phone calls</p><p><strong>Open-Meteo:</strong> forecast</p><p><strong>Telegram:</strong> messages to the family</p></div>
+</div>
+<p class="caption">Min instances: 0. On a quiet day it does nothing and costs nothing.</p>
+</body>
+</html>
