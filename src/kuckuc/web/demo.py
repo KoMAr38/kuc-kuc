@@ -8,9 +8,10 @@ the timeline of that one episode, which only the visitor who started it may read
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import uuid
-from datetime import UTC, timedelta
+from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Request
@@ -21,17 +22,22 @@ from kuckuc.deps import Deps
 from kuckuc.models import DemoSession, EpisodeState, Person, PersonStatus
 from kuckuc.web.demo_limits import (
     DemoRefused,
+    address_key,
     call_cost_usd,
     check_can_start,
     daily_cap_usd,
+    demo_day,
     hash_value,
     normalise_phone,
+    run_quotas,
     verify_cost_usd,
 )
 
 log = logging.getLogger(__name__)
 
 SESSION_HOURS = 24
+# secrets.token_urlsafe(32): 43 letters, digits, "-" and "_".
+TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 VERIFY_STARTS_PER_IP = 10
 # Per number, from any address: our account must not be made to ring or text a stranger again and again.
 VERIFY_STARTS_PER_NUMBER = 3
@@ -73,14 +79,14 @@ def demo_router(deps: Deps) -> APIRouter:
     router = APIRouter(prefix="/api/demo")
 
     def today():
-        return deps.clock.now().astimezone(UTC).date()
+        return demo_day(deps.clock.now())
 
     def ip_hash(request: Request) -> str:
         # The platform appends the address it saw as the last entry. Earlier entries are
         # whatever the client chose to send, so they are not used.
         forwarded = request.headers.get("x-forwarded-for", "")
         address = forwarded.split(",")[-1].strip() or (request.client.host if request.client else "")
-        return hash_value(address, deps.settings.hash_salt)
+        return hash_value(address_key(address), deps.settings.hash_salt)
 
     def demo_number(raw: str) -> tuple[str, str]:
         """A number the demo may call, or DemoRefused. The service's own number is never one:
@@ -91,7 +97,10 @@ def demo_router(deps: Deps) -> APIRouter:
         return phone, country
 
     def live_session(token: str) -> DemoSession | None:
-        session = deps.store.get_demo_session_by_token(token) if token else None
+        # Every token this service hands out has this form; anything else never reaches the store.
+        if not TOKEN.fullmatch(token or ""):
+            return None
+        session = deps.store.get_demo_session_by_token(token)
         if session is None or session.expires_at <= deps.clock.now():
             return None
         return session
@@ -105,22 +114,22 @@ def demo_router(deps: Deps) -> APIRouter:
         except DemoRefused as refused:
             return _refused(refused.code)
         # Sending a code costs money too: neither one address nor one number may ask for codes without end,
-        # and every code counts against the day's budget.
-        starts, number_starts = f"verify-start:{address}", f"verify-start:{phone_hash}"
-        if deps.store.count_ip_runs(starts, today()) >= VERIFY_STARTS_PER_IP:
-            return _refused("ip_limit")
-        if deps.store.count_demo_runs(number_starts, today()) >= VERIFY_STARTS_PER_NUMBER:
-            return _refused("phone_limit")
+        # and every code counts against the day's budget. Counted in one step, so parallel requests
+        # cannot all pass on the same count.
         cost = verify_cost_usd(country, body.channel, deps.settings)
-        if deps.store.get_demo_spend(today()) + cost > daily_cap_usd(today(), deps.settings):
-            return _refused("budget")
-        deps.store.record_demo_run(number_starts, starts, today())
+        quotas = [
+            (f"code-ip:{address}", VERIFY_STARTS_PER_IP, "ip_limit"),
+            (f"code:{phone_hash}", VERIFY_STARTS_PER_NUMBER, "phone_limit"),
+        ]
+        refusal = deps.store.reserve_demo(today(), quotas, cost, daily_cap_usd(today(), deps.settings))
+        if refusal:
+            return _refused(refusal)
         try:
             deps.verify.start(phone, body.channel)
         except Exception as exc:
             log.error("verification could not be started (%s)", type(exc).__name__)
+            deps.store.add_demo_spend(today(), -cost)  # nothing was sent; the attempt still counts
             return _refused("verify_failed", 502)
-        deps.store.add_demo_spend(today(), cost)
         return {"ok": True}
 
     @router.post("/verify/check")
@@ -140,7 +149,6 @@ def demo_router(deps: Deps) -> APIRouter:
         session = DemoSession(
             id=uuid.uuid4().hex[:16],
             token=secrets.token_urlsafe(32),
-            phone="",  # the number itself lives only on the temporary person below
             phone_hash=hash_value(phone, deps.settings.hash_salt),
             country=country,
             expires_at=deps.clock.now() + timedelta(hours=SESSION_HOURS),
@@ -177,8 +185,12 @@ def demo_router(deps: Deps) -> APIRouter:
             )
         except DemoRefused as refused:
             return _refused(refused.code)
-        deps.store.record_demo_run(session.phone_hash, address, today())
-        deps.store.add_demo_spend(today(), call_cost_usd(session.country, deps.settings))  # the code was counted when sent
+        # The run and its calls are counted in one step (the code was counted when it was sent).
+        quotas = run_quotas(session.phone_hash, address, deps.settings)
+        cost = call_cost_usd(session.country, deps.settings)
+        refusal = deps.store.reserve_demo(today(), quotas, cost, daily_cap_usd(today(), deps.settings))
+        if refusal:
+            return _refused(refusal)
 
         hazard, value = SCENARIOS[body.scenario]
         episode_id = f"demo-{uuid.uuid4().hex}"

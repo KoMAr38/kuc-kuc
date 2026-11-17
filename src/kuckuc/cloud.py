@@ -3,6 +3,7 @@ and the check that a request really comes from our own task queue."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Callable
@@ -48,9 +49,13 @@ class CloudTasksQueue:
             schedule_time=when,
             oidc_email=self._invoker,
             audience=self._voice_url,
+            name=f"call-{call_id}",  # one task per call, however often this is asked
         )
 
     def enqueue_due(self, episode_id: str, at: datetime) -> None:
+        # One timer per episode and moment. Episode ids hold characters a task name may not, and a
+        # hashed name also spreads the tasks the way Cloud Tasks asks for.
+        digest = hashlib.sha256(f"{episode_id}@{int(at.timestamp())}".encode()).hexdigest()[:40]
         self.client.create(
             parent=f"{self._queues}/timers",
             url=f"{self._engine_url}/timers",
@@ -58,6 +63,7 @@ class CloudTasksQueue:
             schedule_time=at,
             oidc_email=self._invoker,
             audience=self._engine_url,
+            name=f"due-{digest}",
         )
 
 
@@ -68,8 +74,19 @@ class GoogleTasksClient:
         self._client = tasks_client
 
     def create(
-        self, parent: str, url: str, body: dict, schedule_time: datetime | None, oidc_email: str, audience: str
+        self,
+        parent: str,
+        url: str,
+        body: dict,
+        schedule_time: datetime | None,
+        oidc_email: str,
+        audience: str,
+        name: str | None = None,
     ) -> None:
+        """Creates the task, trying again for half a minute on a passing error. A task of the same
+        name that exists already (an earlier try that did get through) counts as created."""
+        from google.api_core.exceptions import AlreadyExists
+        from google.api_core.retry import Retry, if_transient_error
         from google.cloud import tasks_v2
         from google.protobuf import timestamp_pb2
 
@@ -86,7 +103,13 @@ class GoogleTasksClient:
             stamp = timestamp_pb2.Timestamp()
             stamp.FromDatetime(schedule_time)
             task.schedule_time = stamp
-        self._client.create_task(parent=parent, task=task)
+        if name:
+            task.name = f"{parent}/tasks/{name}"
+        retry = Retry(predicate=if_transient_error, initial=0.5, maximum=5.0, multiplier=2.0, timeout=30.0)
+        try:
+            self._client.create_task(parent=parent, task=task, retry=retry, timeout=10.0)
+        except AlreadyExists:
+            pass
 
 
 class GcsBlobs:
@@ -109,11 +132,13 @@ def gemini_generate(settings) -> Callable[[bytes, str], dict]:
     from google import genai
     from google.genai import types
 
+    from kuckuc.speech.interpret import MODEL_BUDGET_S
+
     client = genai.Client(
         vertexai=True,
         project=settings.project,
         location=settings.gemini_location,
-        http_options=types.HttpOptions(timeout=8000),  # milliseconds
+        http_options=types.HttpOptions(timeout=int(MODEL_BUDGET_S * 1000)),  # milliseconds; each try sets its own
     )
     config = types.GenerateContentConfig(
         temperature=0,
@@ -130,11 +155,11 @@ def gemini_generate(settings) -> Callable[[bytes, str], dict]:
         thinking_config=types.ThinkingConfig(thinking_level=settings.gemini_thinking_level),
     )
 
-    def generate(audio: bytes, prompt: str) -> dict:
+    def generate(audio: bytes, prompt: str, timeout_s: float = MODEL_BUDGET_S) -> dict:
         response = client.models.generate_content(
             model=settings.gemini_model,
             contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt],
-            config=config,
+            config=config.model_copy(update={"http_options": types.HttpOptions(timeout=int(timeout_s * 1000))}),
         )
         return json.loads(response.text)
 

@@ -16,6 +16,12 @@ from kuckuc.web.demo_limits import (
 )
 
 D = date(2026, 11, 21)  # an ordinary demo day: after launch day, before the end
+COUNTRIES = ("US", "CA", "GB", "NO")
+
+
+def record_run(store, phone_hash, ip_hash, day):
+    """A run that already happened that day."""
+    assert store.reserve_demo(day, [(f"run:{phone_hash}", 99, "x"), (f"run-ip:{ip_hash}", 99, "x")], 0.0, 1e9) is None
 
 
 @pytest.fixture
@@ -27,7 +33,7 @@ def verify():
 
 
 def test_normalises_national_format():
-    assert normalise_phone("(415) 555-0100") == ("+14155550100", "US")
+    assert normalise_phone("(415) 555-0100", countries=COUNTRIES) == ("+14155550100", "US")
 
 
 @pytest.mark.parametrize(
@@ -41,7 +47,7 @@ def test_normalises_national_format():
     ],
 )
 def test_accepted_numbers(raw, expected):
-    assert normalise_phone(raw) == expected
+    assert normalise_phone(raw, countries=COUNTRIES) == expected
 
 
 @pytest.mark.parametrize(
@@ -60,12 +66,12 @@ def test_accepted_numbers(raw, expected):
 )
 def test_refusals(raw, code):
     with pytest.raises(DemoRefused) as e:
-        normalise_phone(raw)
+        normalise_phone(raw, countries=COUNTRIES)
     assert e.value.code == code
 
 
 def test_norway_allowed():
-    assert normalise_phone("+47 412 34 567")[1] == "NO"
+    assert normalise_phone("+47 412 34 567", countries=COUNTRIES)[1] == "NO"
 
 
 def test_country_list_comes_from_the_caller():
@@ -81,17 +87,17 @@ def test_caps_by_day(settings):
     assert daily_cap_usd(date(2026, 11, 20), settings) == 15.0 and daily_cap_usd(date(2026, 11, 21), settings) == 5.0
 
 
-def test_run_cost_is_the_verification_plus_two_minutes(settings):
+def test_run_cost_is_the_verification_plus_four_minutes(settings):
     settings.verify_fee_usd = 0.05
     settings.demo_price_per_min_usd = {"US": 0.02, "NO": 0.10}
-    assert run_cost_usd("US", settings) == pytest.approx(0.09)
-    assert run_cost_usd("NO", settings) == pytest.approx(0.25)
+    assert run_cost_usd("US", settings) == pytest.approx(0.13)
+    assert run_cost_usd("NO", settings) == pytest.approx(0.45)
 
 
 def test_unpriced_country_costs_as_much_as_the_dearest_one(settings):
     settings.verify_fee_usd = 0.05
     settings.demo_price_per_min_usd = {"US": 0.02, "NO": 0.10}
-    assert run_cost_usd("GB", settings) == pytest.approx(0.25)
+    assert run_cost_usd("GB", settings) == pytest.approx(0.45)
 
 
 # --- may this run start? ---------------------------------------------------------------------
@@ -110,7 +116,7 @@ def test_refused_after_end_day(store, verify, settings):
 
 def test_third_run_same_number_refused(store, verify, settings):
     for _ in range(2):
-        store.record_demo_run("ph", "ip", D)
+        record_run(store, "ph", "ip", D)
     with pytest.raises(DemoRefused) as e:
         check_can_start(store, verify, settings, "ph", "ip2", "US", D)
     assert e.value.code == "phone_limit"
@@ -119,7 +125,7 @@ def test_third_run_same_number_refused(store, verify, settings):
 
 def test_seventh_run_from_one_address_refused(store, verify, settings):
     for i in range(6):
-        store.record_demo_run(f"ph{i}", "ip", D)
+        record_run(store, f"ph{i}", "ip", D)
     with pytest.raises(DemoRefused) as e:
         check_can_start(store, verify, settings, "new", "ip", "US", D)
     assert e.value.code == "ip_limit"
@@ -195,3 +201,27 @@ def test_hash_depends_on_value_and_salt_and_hides_the_value():
     assert h == hash_value("+14155550100", "salt-a")
     assert h != hash_value("+14155550100", "salt-b") and h != hash_value("+14155550101", "salt-a")
     assert "4155550100" not in h and len(h) == 64
+
+
+def test_a_demo_run_is_counted_as_four_minutes_of_calls(settings):
+    # The person, the neighbour, and up to two "how is she?" calls all ring the visitor's own phone.
+    from kuckuc.web.demo_limits import call_cost_usd
+
+    assert call_cost_usd("GB", settings) == pytest.approx(4 * 0.473)
+
+
+def test_addresses_in_one_ipv6_network_count_as_one_address():
+    # A machine with an IPv6 network can use a new address for every request.
+    from kuckuc.web.demo_limits import address_key
+
+    assert address_key("2001:db8:1:2::1") == address_key("2001:db8:1:2:ffff::9") != address_key("2001:db8:1:3::1")
+    assert address_key("203.0.113.7") == "203.0.113.7" and address_key("") == ""
+
+
+def test_the_demo_day_follows_california():
+    from datetime import UTC, datetime
+
+    from kuckuc.web.demo_limits import demo_day
+
+    assert demo_day(datetime(2026, 11, 21, 3, 0, tzinfo=UTC)) == date(2026, 11, 20)
+    assert demo_day(datetime(2026, 11, 20, 9, 0, tzinfo=UTC)) == date(2026, 11, 20)

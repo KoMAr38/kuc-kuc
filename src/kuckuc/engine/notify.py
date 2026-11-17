@@ -7,32 +7,13 @@ avoid past-tense verbs that would need the person's gender.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 
 from kuckuc.models import Lang
 from kuckuc.store import Store
 
 log = logging.getLogger(__name__)
-
-KEYS = (
-    "alert_created",
-    "call_ok",
-    "call_unwell",
-    "neighbor_called",
-    "neighbor_going",
-    "resolved_ok",
-    "needs_help_194",
-    "nobody_reachable",
-    "neighbor_unconfirmed",
-    "headsup_ok",
-    "headsup_missed",
-    "consent_yes",
-    "consent_no",
-    "consent_missing",
-    "call_blocked",
-    "lost_track",
-    "intro_lost",
-)
 
 _HAZARD_WORDS = {
     "sr": {"heat": "velika vrućina", "cold": "velika hladnoća", "wind": "jak vetar", "snow": "mnogo snega"},
@@ -44,13 +25,18 @@ _MESSAGES: dict[str, dict[str, str]] = {
     "sr": {
         "alert_created": "Stiže {hazard} tamo gde živi {name}. Kuc-kuc će zvati i javiti ti kako je.",
         "call_ok": "{name} se javlja i kaže da je dobro.",
-        "call_unwell": "HITNO: {name} kaže da nije dobro. Zovemo komšiju.",
+        "call_unwell": "HITNO: {name} kaže da nije dobro.",
         "neighbor_called": "{neighbor} dobija poziv da ode i proveri kako je {name}.",
         "neighbor_going": "{neighbor} kaže da ide da proveri kako je {name}. Uskoro pitamo šta je bilo.",
         "resolved_ok": "{neighbor} javlja da je {name} dobro. Uzbuna je završena.",
         "needs_help_194": "HITNO: {neighbor} javlja da {name} treba pomoć. Pozovi hitnu pomoć 194.",
         "nobody_reachable": (
-            "HITNO: {name} se ne javlja i nijedan komšija nije dostupan. Pozovi je ili nekoga ko je blizu."
+            "HITNO: nijedan komšija nije dostupan, a ne znamo kako je {name}. "
+            "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
+        ),
+        "nobody_reachable_unwell": (
+            "HITNO: {name} kaže da nije dobro, a nijedan komšija nije dostupan. "
+            "Pozovi odmah nekoga ko je blizu ili hitnu pomoć 194."
         ),
         "neighbor_unconfirmed": (
             "HITNO: {neighbor} ide da proveri kako je {name}, ali se više ne javlja na telefon. "
@@ -64,20 +50,38 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "{name}: nema odgovora na uvodni poziv posle tri pokušaja. "
             "Razgovarajte prvo, pa pokreni uvodni poziv ponovo."
         ),
-        "call_blocked": "HITNO: poziv za {name} nije obavljen jer je sistem zaustavio pozive. Proveri je sam.",
+        "call_blocked": (
+            "HITNO: poziv nije obavljen, pa ne znamo kako je {name}. "
+            "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
+        ),
+        "intro_blocked": "{name}: uvodni poziv nije obavljen. Pokreni ga ponovo sa svoje stranice.",
         "lost_track": "HITNO: provera za {name} je zastala. Ne znamo kako je {name}. Pozovi nekoga ko je blizu.",
         "intro_lost": "{name}: uvodni poziv nije završen. Pokreni ga ponovo sa svoje stranice.",
+        "call_refused": (
+            "HITNO, {name}: poziv nije mogao ni da krene, jer je telefonska mreža odbila broj. "
+            "Proveri broj na svojoj stranici."
+        ),
+        "neighbor_refused": (
+            "HITNO: poziv komšiji nije mogao ni da krene: telefonska mreža je odbila njegov broj. "
+            "Proveri broj na svojoj stranici. Javljamo ti čim saznamo kako je {name}."
+        ),
+        "intro_refused": "{name}: uvodni poziv nije mogao ni da krene, jer je telefonska mreža odbila broj. Proveri broj.",
     },
     "en": {
         "alert_created": "There will be {hazard} where {name} lives. Kuc-kuc will call and tell you how it went.",
         "call_ok": "{name} answered and says everything is fine.",
-        "call_unwell": "URGENT: {name} says they are not well. We are calling the neighbour.",
+        "call_unwell": "URGENT: {name} says they are not well.",
         "neighbor_called": "{neighbor} is being called and asked to check on {name}.",
         "neighbor_going": "{neighbor} says they are going to check on {name}. We will ask shortly how it went.",
         "resolved_ok": "{neighbor} reports that {name} is fine. The alert is closed.",
         "needs_help_194": "URGENT: {neighbor} reports that {name} needs help. Call the emergency number now.",
         "nobody_reachable": (
-            "URGENT: {name} is not answering and no neighbour could be reached. Call them or someone nearby."
+            "URGENT: no neighbour can be reached, and we do not know how {name} is. "
+            "Check now: phone, or ask someone nearby."
+        ),
+        "nobody_reachable_unwell": (
+            "URGENT: {name} says they are not well, and no neighbour can be reached. "
+            "Call someone nearby or the emergency number now."
         ),
         "neighbor_unconfirmed": (
             "URGENT: {neighbor} went to check on {name} but is no longer answering the phone. "
@@ -90,9 +94,22 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "consent_missing": (
             "{name}: no answer to the introduction call after three tries. Talk to them first, then start it again."
         ),
-        "call_blocked": "URGENT: the call to {name} was not made because calls are stopped. Check on them yourself.",
+        "call_blocked": (
+            "URGENT: the call could not be made, so we do not know how {name} is. "
+            "Check now: phone, or ask someone nearby."
+        ),
+        "intro_blocked": "{name}: the introduction call was not made. Start it again from your page.",
         "lost_track": "URGENT: the check on {name} stalled. We do not know how {name} is. Call someone nearby.",
         "intro_lost": "{name}: the introduction call did not finish. Start it again from your page.",
+        "call_refused": (
+            "URGENT, {name}: the call could not even start: the phone network refused the number. "
+            "Check the number on your page."
+        ),
+        "neighbor_refused": (
+            "URGENT: the call to the neighbour could not even start: the phone network refused their number. "
+            "Check the number on your page. We will tell you how {name} is."
+        ),
+        "intro_refused": "{name}: the introduction call could not even start: the phone network refused the number. Check it.",
     },
 }
 _FALLBACK = {"sr": "Kuc-kuc: novo stanje za {name} ({key}).", "en": "Kuc-kuc: an update about {name} ({key})."}
@@ -127,10 +144,19 @@ class TelegramNotifier:
     the calls it is about.
     """
 
-    def __init__(self, store: Store, token: str, http_post: Callable[[str, dict], object]) -> None:
+    ATTEMPTS = 3
+
+    def __init__(
+        self,
+        store: Store,
+        token: str,
+        http_post: Callable[[str, dict], object],
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._store = store
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
         self._http_post = http_post
+        self._sleep = sleep
 
     def send(self, owner_uid: str, key: str, params: dict[str, str], urgent: bool) -> bool:
         user = self._store.get_user(owner_uid) if owner_uid else None
@@ -141,13 +167,18 @@ class TelegramNotifier:
             "text": render_message(key, user.lang, params),
             "disable_notification": not urgent,
         }
-        try:
-            self._http_post(self._url, body)
-        except Exception as exc:
-            # The address contains the bot's token, so neither it nor the error text is logged.
-            log.error("family notice %s not delivered (%s)", key, type(exc).__name__)
-            return False
-        return True
+        failure = ""
+        for attempt in range(self.ATTEMPTS):
+            if attempt:
+                self._sleep(attempt)  # a second, then two: Telegram's hiccups are short
+            try:
+                self._http_post(self._url, body)
+                return True
+            except Exception as exc:
+                failure = type(exc).__name__
+        # The address contains the bot's token, so neither it nor the error text is logged.
+        log.error("family notice %s not delivered after %d tries (%s)", key, self.ATTEMPTS, failure)
+        return False
 
 
 def register_telegram_webhook(token: str, web_url: str, secret: str, http_post: Callable[[str, dict], object]) -> bool:

@@ -123,17 +123,9 @@ def test_demo_spend_accumulates_per_day(store):
     assert store.get_demo_spend(TODAY + timedelta(days=1)) == 0.0
 
 
-def test_demo_runs_counted_per_phone_and_per_ip(store):
-    store.record_demo_run("ph1", "ip1", TODAY)
-    store.record_demo_run("ph2", "ip1", TODAY)
-    assert store.count_demo_runs("ph1", TODAY) == 1
-    assert store.count_ip_runs("ip1", TODAY) == 2
-    assert store.count_demo_runs("ph1", TODAY + timedelta(days=1)) == 0
-
-
 def test_settings_defaults_match_the_safety_limits():
     s = Settings(_env_file=None)
-    assert (s.max_person_calls_per_day, s.quiet_start_hour, s.quiet_end_hour) == (6, 8, 20)
+    assert (s.max_person_calls_per_day, s.quiet_start_hour, s.quiet_end_hour, s.intro_end_hour) == (6, 8, 20, 23)
     assert (s.heat_apparent_c, s.cold_temp_c, s.wind_gust_kmh, s.snow_cm) == (35.0, -10.0, 80.0, 20.0)
     assert s.demo_countries == ("US", "CA", "GB", "NO")
 
@@ -193,3 +185,30 @@ def test_open_episodes_are_listed_and_closed_ones_are_not(store):
     store.create_episode(make_episode(id="done", state=EpisodeState.CLOSED, result=Result.OK))
     found = {e.id: e for e in store.list_open_episodes()}
     assert sorted(found) == ["open1", "open2"] and found["open2"].due_at == T0
+
+
+def test_each_recording_of_a_call_is_claimed_once(store):
+    # Twilio can deliver the same recording twice, to two servers; only the first may handle it.
+    assert store.claim_recording("c1", 1) is True
+    assert store.claim_recording("c1", 1) is False
+    assert store.claim_recording("c1", 2) is True and store.claim_recording("c2", 1) is True
+
+
+def test_a_call_can_be_claimed_for_dialling_once(store):
+    store.put_call(make_call(id="c1"))
+    assert store.start_dialing("c1", T0) is True
+    assert store.start_dialing("c1", T0) is False
+    assert (store.get_call("c1").status, store.get_call("c1").placed_at) == ("dialing", T0)
+    assert store.start_dialing("missing", T0) is False
+
+
+def test_a_demo_reservation_counts_every_quota_and_the_money_all_or_nothing(store):
+    quotas = [("run:ph", 2, "phone_limit"), ("run-ip:ip", 6, "ip_limit")]
+    assert store.reserve_demo(TODAY, quotas, 1.0, 5.0) is None
+    assert store.reserve_demo(TODAY, quotas, 1.0, 5.0) is None
+    assert store.reserve_demo(TODAY, quotas, 1.0, 5.0) == "phone_limit"  # a third run on one number
+    assert store.demo_count(TODAY, "run:ph") == 2 and store.demo_count(TODAY, "run-ip:ip") == 2
+    assert store.get_demo_spend(TODAY) == 2.0
+    assert store.reserve_demo(TODAY, [("run:other", 2, "phone_limit")], 3.5, 5.0) == "budget"  # 2 + 3.5 > 5
+    assert store.demo_count(TODAY, "run:other") == 0 and store.get_demo_spend(TODAY) == 2.0
+    assert store.demo_count(TODAY + timedelta(days=1), "run:ph") == 0

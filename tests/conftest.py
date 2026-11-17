@@ -7,14 +7,17 @@ from kuckuc.config import Settings
 from kuckuc.store import MemoryStore
 
 # Set KUCKUC_TEST_FIRESTORE_PROJECT to also run every store test against a real Firestore
-# database, in throwaway collections that are deleted afterwards.
-FIRESTORE_PROJECT = os.environ.get("KUCKUC_TEST_FIRESTORE_PROJECT", "")
+# database, in throwaway collections that are deleted afterwards. With the local emulator running
+# (FIRESTORE_EMULATOR_HOST set) they run against it instead, with no project and no network.
+FIRESTORE_PROJECT = os.environ.get("KUCKUC_TEST_FIRESTORE_PROJECT", "") or (
+    "demo-kuckuc" if os.environ.get("FIRESTORE_EMULATOR_HOST") else ""
+)
 
 
 @pytest.fixture
 def firestore_store():
     if not FIRESTORE_PROJECT:
-        pytest.skip("set KUCKUC_TEST_FIRESTORE_PROJECT to run against Firestore")
+        pytest.skip("set KUCKUC_TEST_FIRESTORE_PROJECT (or FIRESTORE_EMULATOR_HOST) to run against Firestore")
     from google.cloud import firestore
 
     from kuckuc.store_firestore import COLLECTIONS, FirestoreStore

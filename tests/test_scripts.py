@@ -47,7 +47,7 @@ def test_manual_check_has_no_hazard_sentence():
 def test_neighbour_ask_sr_verbatim():
     assert render(ScriptKind.NEIGHBOR_ASK_SILENT, "sr", P) == (
         "Dobar dan, Dragan. Ovde Kuc-kuc. baba Milena se ne javlja na telefon, a danas je veoma hladno. "
-        "Možete li da odete do nje sada? Recite da ili ne."
+        "Recite da ili ne: možete li da odete do nje sada?"
     )
 
 
@@ -55,7 +55,7 @@ def test_neighbour_ask_without_hazard_drops_the_weather_clause():
     calm = replace(P, hazard=None, value=None)
     assert render(ScriptKind.NEIGHBOR_ASK_SILENT, "sr", calm) == (
         "Dobar dan, Dragan. Ovde Kuc-kuc. baba Milena se ne javlja na telefon. "
-        "Možete li da odete do nje sada? Recite da ili ne."
+        "Recite da ili ne: možete li da odete do nje sada?"
     )
 
 
@@ -69,7 +69,7 @@ def test_neighbour_ask_uses_gender():
 
 def test_neighbour_followup_sr_verbatim():
     assert render(ScriptKind.NEIGHBOR_FOLLOWUP, "sr", P) == (
-        "Dobar dan, Dragan. Jeste li proverili kako je baba Milena? Recite: dobro je, ili: treba pomoć."
+        "Dobar dan, Dragan. Recite: dobro je, ili: treba pomoć. Kako je baba Milena?"
     )
 
 
@@ -77,14 +77,14 @@ def test_intro_sr_verbatim():
     assert render(ScriptKind.INTRO_PERSON, "sr", P) == (
         "Dobar dan, baba Milena. Ovde Kuc-kuc. Ovu službu je za vas uključio vaš unuk Petar. "
         "Zvaćemo vas samo kad stiže opasno vreme, da proverimo da li ste dobro. "
-        "Vaš odgovor se kratko snima da vaš unuk Petar može da ga čuje. Da li se slažete? Recite da ili ne."
+        "Vaš odgovor se kratko snima da vaš unuk Petar može da ga čuje. Recite da ili ne: da li se slažete?"
     )
 
 
 def test_intro_mentions_recording_and_asks_consent():
     for script in (ScriptKind.INTRO_PERSON, ScriptKind.INTRO_NEIGHBOR):
         t = render(script, "sr", P)
-        assert "snima" in t and t.endswith("Da li se slažete? Recite da ili ne.")
+        assert "snima" in t and t.endswith("Recite da ili ne: da li se slažete?")
 
 
 def test_neighbour_intro_greets_the_neighbour_not_the_person():
@@ -99,10 +99,10 @@ def test_english_check_and_neighbour_lines():
     )
     assert render(ScriptKind.NEIGHBOR_ASK_SILENT, "en", en) == (
         "Hello, Bob. This is Kuc-kuc. Ann isn't answering the phone, and today is very hot. "
-        "Can you go and check on her now? Please say yes or no."
+        "Please say yes or no: can you go and check on her now?"
     )
     assert render(ScriptKind.NEIGHBOR_FOLLOWUP, "en", replace(en, gender="m")) == (
-        "Hello, Bob. Did you see Ann? Please say: he is fine, or: he needs help."
+        "Hello, Bob. Please say: he is fine, or: he needs help. How is Ann?"
     )
 
 
@@ -130,10 +130,10 @@ def test_question_for():
 
 
 def test_reask_matches_the_question():
-    assert reask(Question.WELLBEING, "sr") == "Nisam vas razumela. Jeste li dobro? Recite da ili ne."
+    assert reask(Question.WELLBEING, "sr") == "Nisam vas razumela. Recite da ili ne: jeste li dobro?"
     assert reask(Question.YES_NO, "sr") == "Nisam vas razumela. Recite da ili ne."
     assert reask(Question.NEIGHBOR_REPORT, "sr") == "Nisam vas razumela. Recite: dobro je, ili: treba pomoć."
-    assert reask(Question.WELLBEING, "en") == "Sorry, I didn't catch that. Are you okay? Please say yes or no."
+    assert reask(Question.WELLBEING, "en") == "Sorry, I didn't catch that. Please say yes or no: are you okay?"
 
 
 def test_closing_ok_says_take_care():
@@ -196,3 +196,19 @@ def test_whether_there_is_a_neighbour_survives_storage_and_old_calls_keep_the_ol
     assert params_from_dict(params_to_dict(replace(P, has_neighbor=False))).has_neighbor is False
     assert params_from_dict(params_to_dict(P)).has_neighbor is True
     assert params_from_dict({"name": "N"}).has_neighbor is True  # calls stored before the field existed
+
+
+def test_every_call_ends_with_its_question_so_the_answer_is_recorded():
+    # Recording starts when the voice stops. "Recite da ili ne: da li se slažete?" made a neighbour
+    # answer "Da" during the last four words, which were not recorded.
+    for lang in ("sr", "en"):
+        for script in ScriptKind:
+            assert render(script, lang, P).endswith("?"), (lang, script)
+        assert reask(Question.WELLBEING, lang).endswith("?"), lang
+
+
+def test_a_consent_answer_is_said_back_so_a_mistake_is_heard_at_once():
+    assert closing(ScriptKind.INTRO_NEIGHBOR, Answer.YES, "sr", P) == "Razumela sam: da. Hvala. Doviđenja."
+    assert closing(ScriptKind.INTRO_NEIGHBOR, Answer.NO, "sr", P) == "Razumela sam: ne. Hvala. Doviđenja."
+    assert closing(ScriptKind.INTRO_PERSON, Answer.YES, "en", P) == "I understood: yes. Thank you. Goodbye."
+    assert closing(ScriptKind.INTRO_PERSON, Answer.UNCLEAR, "sr", P) == "Hvala. Doviđenja."

@@ -479,7 +479,7 @@ def test_the_google_check_refuses_everything_until_a_client_id_is_configured():
 
 
 def night(client):
-    client.sys.clock.advance(int(12.5 * 3600))  # from 10:00 to 22:30 in Belgrade
+    client.sys.clock.advance(int(13.5 * 3600))  # from 10:00 to 23:30 in Belgrade: past 23:00, introductions wait
 
 
 def test_enrolling_at_night_calls_nobody_until_eight_in_the_morning_there(family):
@@ -488,7 +488,7 @@ def test_enrolling_at_night_calls_nobody_until_eight_in_the_morning_there(family
     assert reply.status_code == 201 and reply.json()["intro_at_local"] == "08:00"
     family.sys.run_tasks(0)
     assert real_calls(family.sys) == [] and family.deps.telephony.placed == []
-    family.sys.run_tasks(advance_s=int(9.5 * 3600) - 60)  # 07:59 there
+    family.sys.run_tasks(advance_s=int(8.5 * 3600) - 60)  # 07:59 there
     assert real_calls(family.sys) == []
     family.sys.run_tasks(advance_s=60)  # 08:00 there
     assert sorted(c.script for c in real_calls(family.sys)) == [ScriptKind.INTRO_NEIGHBOR, ScriptKind.INTRO_PERSON]
@@ -606,3 +606,133 @@ def test_nobody_else_can_call_my_neighbour(family, other_user):
     pid, nid = missed_neighbour_intro(family)
     assert other_user.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro").status_code == 404
     assert family.post(f"/api/family/persons/{pid}/neighbors/unknown/intro").status_code == 404
+
+
+def test_at_night_the_family_may_still_call_a_neighbour_who_is_waiting_for_the_call(family):
+    # The family has just talked to the neighbour, who now waits by the phone: the night rule
+    # gives way when the family says so, as it does for "Call now".
+    pid, nid = missed_neighbour_intro(family)
+    night(family)
+    reply = family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={"now": True})
+    assert reply.status_code == 202 and reply.json()["intro_at_local"] is None
+    queued = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR]
+    assert len(queued) == 1
+
+
+def test_at_night_without_asking_the_neighbours_call_waits_for_the_morning(family):
+    pid, nid = missed_neighbour_intro(family)
+    night(family)
+    reply = family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro")
+    assert reply.status_code == 202 and reply.json()["intro_at_local"] == "08:00"
+    neighbour_calls = [c for c in real_calls(family.sys) if c.script == ScriptKind.INTRO_NEIGHBOR]
+    assert [c for c in neighbour_calls if c.status == "queued"] == []
+
+
+def test_the_page_offers_calling_the_neighbour_now_or_in_the_morning():
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parent.parent / "src" / "kuckuc" / "web" / "static" / "family.js").read_text(encoding="utf-8")
+    assert "neighbor_now" in js and "neighbor_morning" in js and "{ now: true }" in js
+
+
+def test_an_introduction_asked_for_at_nine_in_the_evening_rings_at_once(family):
+    # 20:00 was too early to stop: people are up, and the family is often just back from work.
+    family.sys.clock.advance(11 * 3600)  # 21:00 in Belgrade
+    reply = family.post("/api/family/persons", json=enrol_body())
+    assert reply.json()["intro_at_local"] is None
+    assert [c.script for c in real_calls(family.sys)] == [ScriptKind.INTRO_PERSON]
+
+
+def test_the_page_knows_until_when_introductions_ring(web):
+    assert 'data-intro-end="23"' in web.get("/family").text
+
+
+# --- a neighbour recorded as "no" who has since agreed ---------------------------------------
+
+
+def declined_neighbour(family):
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    (call,) = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR]
+    complete(family.sys, call, Answer.NO)
+    (neighbor,) = family.get("/api/family/me").json()["persons"][0]["neighbors"]
+    assert neighbor["status"] == "declined"
+    return pid, neighbor["id"]
+
+
+def test_a_neighbour_recorded_as_no_is_called_again_only_when_the_family_says_they_agreed(family):
+    # His "Da" was spoken while the voice was still talking and was not recorded; the family talked to him.
+    pid, nid = declined_neighbour(family)
+    first = family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro")
+    assert first.status_code == 409 and first.json()["code"] == "agreed_needed"
+    again = family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={"agreed": True})
+    assert again.status_code == 202
+    (call,) = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR]
+    complete(family.sys, call, Answer.YES)
+    assert family.get("/api/family/me").json()["persons"][0]["neighbors"][0]["status"] == "active"
+
+
+def test_the_page_asks_before_calling_a_neighbour_who_said_no():
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parent.parent / "src" / "kuckuc" / "web" / "static" / "family.js").read_text(encoding="utf-8")
+    assert "neighbor_declined_confirm" in js and "agreed: true" in js
+
+
+def test_every_call_button_and_question_says_whom_it_calls():
+    # A "Call now" on her card was taken for the neighbour's, and she was rung instead of him.
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parent.parent / "src" / "kuckuc" / "web" / "static" / "family.js").read_text(encoding="utf-8")
+    block = js[js.index("var TEXT = {") : js.index("};", js.index("var TEXT = {"))]
+    for key in ("call_now", "yes_call", "confirm_late", "neighbor_again", "neighbor_now", "neighbor_agreed"):
+        entry = re.search(rf"^\s{{4}}{key}: \{{.*?\}},?$", block, flags=re.M | re.S).group(0)
+        assert entry.count("{name}") == 2, key  # in Serbian and in English
+    assert "function who(" in js and 't("role_" + p.role)' not in js
+
+
+# --- audit 17 Nov ---------------------------------------------------------------------------
+
+
+def hold_events(client):
+    """Requests reach the engine a few seconds later in the cloud; here, not at all."""
+    held = []
+    client.deps.bus.publish = lambda type, data: held.append((type, data))
+    return held
+
+
+def test_two_quick_clicks_on_call_now_start_one_check(family):
+    pid = enrol(family)
+    activate(family, pid)
+    held = hold_events(family)
+    for _ in range(2):
+        assert family.post(f"/api/family/persons/{pid}/call-now").status_code == 202
+    ids = [d["episode_id"] for t, d in held if t == "check.requested"]
+    assert len(ids) == 2 and ids[0] == ids[1]  # the engine starts an episode id once
+
+
+def test_two_quick_clicks_on_a_neighbours_introduction_start_one(family):
+    pid, nid = missed_neighbour_intro(family)
+    held = hold_events(family)
+    for _ in range(2):
+        assert family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={"now": True}).status_code == 202
+    ids = [d.get("episode_id") for t, d in held if t == "intro.requested"]
+    assert len(ids) == 2 and ids[0] and ids[0] == ids[1]
+
+
+def test_a_persons_introduction_can_be_repeated_while_a_neighbours_is_under_way(family):
+    pid = enrol(family, neighbors=[{"name": "Dragan", "phone": "+15005550007"}])
+    for _ in range(3):
+        (pending,) = [c for c in real_calls(family.sys) if c.status == "queued" and c.script == ScriptKind.INTRO_PERSON]
+        complete(family.sys, pending, Answer.NO_ANSWER)
+    assert any(c.status == "queued" and c.script == ScriptKind.INTRO_NEIGHBOR for c in real_calls(family.sys))
+    assert family.post(f"/api/family/persons/{pid}/intro").status_code == 202
+
+
+def test_a_premium_rate_number_is_never_enrolled(family):
+    # Each enrolment rings the number; a paid line would cost money on every call.
+    r = family.post("/api/family/persons", json=enrol_body(phone="+381 900 123 456"))
+    assert r.status_code == 422 and r.json()["code"] == "bad_number"
+    neighbour = {"name": "Dragan", "phone": "+1 900 555 0100"}
+    r = family.post("/api/family/persons", json=enrol_body(neighbors=[neighbour]))
+    assert r.status_code == 422 and r.json()["code"] == "bad_number"

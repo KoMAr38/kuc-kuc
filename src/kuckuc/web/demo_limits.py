@@ -8,9 +8,11 @@ limits apply to the demo alone; they never stand in the way of a call to a real 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 from datetime import date, datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import phonenumbers
 from phonenumbers import PhoneNumberType
@@ -22,12 +24,15 @@ from kuckuc.telephony.base import Verify
 
 log = logging.getLogger(__name__)
 
-DEFAULT_COUNTRIES = ("US", "CA", "GB", "NO")
 # Ordinary home and mobile lines only: never premium-rate, toll-free, short or special numbers.
 _ORDINARY = frozenset(
     {PhoneNumberType.FIXED_LINE, PhoneNumberType.MOBILE, PhoneNumberType.FIXED_LINE_OR_MOBILE}
 )
-DEMO_CALL_MINUTES = 2
+# One run can ring the visitor's own phone four times: as the person, as the neighbour, and up to
+# twice with "how is she?". Each is billed by the started minute.
+DEMO_CALL_MINUTES = 4
+# The demo's day is Product Hunt's day: it starts at 00:01 in California.
+DEMO_DAY_ZONE = ZoneInfo("America/Los_Angeles")
 BALANCE_CACHE_S = 300
 
 
@@ -40,9 +45,7 @@ class DemoRefused(Exception):
         self.code = code
 
 
-def normalise_phone(
-    raw: str | None, default_region: str = "US", countries: tuple[str, ...] = DEFAULT_COUNTRIES
-) -> tuple[str, str]:
+def normalise_phone(raw: str | None, *, countries: tuple[str, ...], default_region: str = "US") -> tuple[str, str]:
     """``(E.164 number, ISO country)`` for a number the demo may call; raises DemoRefused otherwise."""
     try:
         number = phonenumbers.parse(raw or "", default_region)
@@ -70,13 +73,37 @@ def verify_cost_usd(country: str, channel: Literal["sms", "call"], settings: Set
 
 
 def call_cost_usd(country: str, settings: Settings) -> float:
-    """What the calls of one demo run are counted as: two minutes."""
+    """What the calls of one demo run are counted as: four minutes."""
     return DEMO_CALL_MINUTES * _per_minute_usd(country, settings)
 
 
 def run_cost_usd(country: str, settings: Settings) -> float:
     """A whole demo run, code included: what must still fit in the day's budget before one starts."""
     return settings.verify_fee_usd + call_cost_usd(country, settings)
+
+
+def demo_day(now: datetime) -> date:
+    """The day every demo limit and the budget count in."""
+    return now.astimezone(DEMO_DAY_ZONE).date()
+
+
+def address_key(address: str) -> str:
+    """What one visitor's address is counted as. An IPv6 machine usually owns a whole /64 network
+    and can use a new address for every request, so the network counts."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    if ip.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
+def run_quotas(phone_hash: str, ip_hash: str, settings: Settings) -> list[tuple[str, int, str]]:
+    return [
+        (f"run:{phone_hash}", settings.demo_runs_per_phone, "phone_limit"),
+        (f"run-ip:{ip_hash}", settings.demo_runs_per_ip, "ip_limit"),
+    ]
 
 
 def daily_cap_usd(day: date, settings: Settings) -> float:
@@ -89,10 +116,10 @@ def check_can_start(
     """Returns quietly when a demo run may start; raises DemoRefused with the reason when not."""
     if today > settings.demo_end_day:
         raise DemoRefused("ended")
-    if store.count_demo_runs(phone_hash, today) >= settings.demo_runs_per_phone:
-        raise DemoRefused("phone_limit")
-    if store.count_ip_runs(ip_hash, today) >= settings.demo_runs_per_ip:
-        raise DemoRefused("ip_limit")
+    # A first, quick refusal; the run itself is counted atomically by store.reserve_demo.
+    for key, limit, refusal in run_quotas(phone_hash, ip_hash, settings):
+        if store.demo_count(today, key) >= limit:
+            raise DemoRefused(refusal)
     if store.get_demo_spend(today) + run_cost_usd(country, settings) > daily_cap_usd(today, settings):
         raise DemoRefused("budget")
     try:

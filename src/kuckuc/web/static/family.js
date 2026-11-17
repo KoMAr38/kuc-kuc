@@ -34,12 +34,12 @@
     hazard_cold: { sr: "velika hladnoća", en: "extreme cold" },
     hazard_wind: { sr: "jak vetar", en: "strong wind" },
     hazard_snow: { sr: "mnogo snega", en: "heavy snow" },
-    call_now: { sr: "Pozovi sada", en: "Call now" },
+    call_now: { sr: "Pozovi sada: {name}", en: "Call now: {name}" },
     pause: { sr: "Pauziraj", en: "Pause" },
     resume: { sr: "Nastavi", en: "Resume" },
-    intro_again: { sr: "Ponovi uvodni poziv", en: "Repeat the introduction call" },
-    confirm_late: { sr: "Tamo je sada {time}. Svejedno pozvati?", en: "It is {time} there now. Call anyway?" },
-    yes_call: { sr: "Da, pozovi", en: "Yes, call" },
+    intro_again: { sr: "Ponovi uvodni poziv: {name}", en: "Repeat the introduction call: {name}" },
+    confirm_late: { sr: "Tamo je sada {time}. Svejedno pozvati: {name}?", en: "It is {time} there now. Call {name} anyway?" },
+    yes_call: { sr: "Da, pozovi: {name}", en: "Yes, call {name}" },
     cancel: { sr: "Odustani", en: "Cancel" },
     neighbors: { sr: "Komšije", en: "Neighbours" },
     history: { sr: "Šta se dešavalo", en: "What has happened" },
@@ -67,7 +67,15 @@
       sr: "Ovaj broj je već prijavljen, pogledaj gore u spisku.",
       en: "This number is already enrolled; see the list above."
     },
-    neighbor_again: { sr: "Pozovi ponovo", en: "Call again" },
+    neighbor_again: { sr: "Pozovi ponovo: {name}", en: "Call again: {name}" },
+    neighbor_late: { sr: "Tamo je sada {time}.", en: "It is {time} there now." },
+    neighbor_now: { sr: "Pozovi sada: {name}", en: "Call now: {name}" },
+    neighbor_morning: { sr: "Ujutru u 8", en: "At 8 in the morning" },
+    neighbor_declined_confirm: {
+      sr: "Snimljeno je „ne”. Pozovi ponovo samo ako ste se u međuvremenu dogovorili.",
+      en: "A \u201cno\u201d was recorded. Call again only if you have talked since and they agreed."
+    },
+    neighbor_agreed: { sr: "Dogovorili smo se, pozovi: {name}", en: "We have talked, call {name}" },
     err_telegram_first: {
       sr: "Prvo poveži Telegram (gore, u delu Obaveštenja): tamo ti stižu sve poruke o pozivima.",
       en: "Connect Telegram first (Notifications, above): every message about the calls arrives there."
@@ -76,6 +84,14 @@
     err_busy: { sr: "Poziv je već u toku ili zakazan.", en: "A call is already under way or planned." },
     err_not_active: { sr: "Osoba još nije dala pristanak ili je pauzirana.", en: "The person has not consented yet, or is paused." },
     err_generic: { sr: "Nešto nije uspelo. Pokušaj ponovo.", en: "Something went wrong. Try again." },
+    err_too_many: {
+      sr: "Već pratiš najveći broj osoba za jedan nalog.",
+      en: "You already follow the most people one account can."
+    },
+    err_not_pending: {
+      sr: "Pristanak je već dat ili odbijen; ovaj poziv više nije potreban.",
+      en: "Consent was already given or refused; this call is no longer needed."
+    },
     started: { sr: "Pokrenuto. Telefon će zazvoniti za nekoliko sekundi.", en: "Started. The phone will ring in a few seconds." },
     enrolled: { sr: "Prijavljeno. Uvodni pozivi su krenuli.", en: "Enrolled. The introduction calls are on their way." },
     enrolled_later: {
@@ -110,6 +126,10 @@
     e_call_answered: { sr: "Podignuta slušalica", en: "Picked up" },
     e_answer_interpreted: { sr: "Odgovor", en: "Answer" },
     e_family_notified: { sr: "Poruka porodici", en: "Family notified" },
+    e_call_refused: {
+      sr: "Mreža je odbila broj, telefon nije zazvonio",
+      en: "The network refused the number; the phone did not ring"
+    },
     e_family_not_notified: {
       sr: "Poruka porodici NIJE stigla (Telegram nije povezan ili nije dostupan)",
       en: "Message to the family NOT delivered (Telegram not connected or not reachable)"
@@ -130,13 +150,16 @@
   };
 
   var app = document.getElementById("family-app");
+  // Until when an introduction may ring where the person lives; later, the family is asked first.
+  var INTRO_START = Number(app.getAttribute("data-intro-start")) || 8;
+  var INTRO_END = Number(app.getAttribute("data-intro-end")) || 23;
   if (!app) {
     return;
   }
   var $ = function (id) {
     return document.getElementById(id);
   };
-  var state = { me: null, lang: "en", place: null, timer: null };
+  var state = { me: null, lang: "en", place: null, timer: null, shape: "", seen: {} };
   try {
     var stored = localStorage.getItem("kuckuc-lang");
     if (stored) {
@@ -229,11 +252,22 @@
 
   // --- one person ----------------------------------------------------------------------------
 
-  function eventText(event) {
+  // Who a call went to, by name: "person" and "neighbour" were read as the wrong people.
+  function who(person, role) {
+    if (role === "person") {
+      return person.name;
+    }
+    if (role === "neighbor" && person.neighbors.length === 1) {
+      return person.neighbors[0].name;
+    }
+    return t("role_" + role);
+  }
+
+  function eventText(event, person) {
     var p = event.public || {};
     var text = t("e_" + event.type);
     if (p.role) {
-      text += " (" + t("role_" + p.role) + ")";
+      text += " (" + who(person, p.role) + ")";
     }
     if (event.type === "answer_interpreted") {
       text += ": " + t("a_" + p.answer) + (p.transcript ? " · “" + p.transcript + "”" : "");
@@ -245,7 +279,8 @@
     return text;
   }
 
-  function renderEpisodes(box, person, episodes) {
+  // ``opened``: ids of the episodes whose details were open, kept when the history is redrawn.
+  function renderEpisodes(box, person, episodes, opened) {
     box.textContent = "";
     box.appendChild(el("h4", null, t("history")));
     if (!episodes.length) {
@@ -255,9 +290,8 @@
     var running = false;
     episodes.forEach(function (episode, index) {
       var details = el("details", "episode");
-      if (index === 0) {
-        details.open = true;
-      }
+      details.dataset.id = episode.id;
+      details.open = opened ? !!opened[episode.id] : index === 0;
       var result = episode.result ? t("r_" + episode.result) : t(episode.state === "scheduled" ? "r_scheduled" : "r_running");
       if (!episode.result && episode.state !== "scheduled") {
         running = true;
@@ -270,7 +304,7 @@
         var time = el("time", null, new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }));
         time.dateTime = event.at;
         row.appendChild(time);
-        row.appendChild(el("span", null, eventText(event)));
+        row.appendChild(el("span", null, eventText(event, person)));
         list.appendChild(row);
       });
       details.appendChild(list);
@@ -279,7 +313,7 @@
           return;
         }
         var wrap = el("p", "recording");
-        wrap.appendChild(el("span", null, t("play") + " (" + t("role_" + call.role) + "): "));
+        wrap.appendChild(el("span", null, t("play") + " (" + who(person, call.role) + "): "));
         var audio = el("audio");
         audio.controls = true;
         audio.preload = "none";
@@ -294,7 +328,17 @@
 
   function loadEpisodes(person, box) {
     return api("GET", "/api/family/persons/" + person.id + "/episodes").then(function (result) {
-      return result.ok ? renderEpisodes(box, person, result.data) : false;
+      if (!result.ok) {
+        return false;
+      }
+      state.seen[person.id] = JSON.stringify(result.data);
+      return renderEpisodes(box, person, result.data);
+    });
+  }
+
+  function isRunning(episodes) {
+    return episodes.some(function (episode) {
+      return !episode.result && episode.state !== "scheduled";
     });
   }
 
@@ -323,12 +367,20 @@
 
   function act(person, path, body, okText) {
     say("");
+    // Every button waits for the reply: a second click used to start a second call.
+    var buttons = Array.prototype.slice.call(document.querySelectorAll("#people button"));
+    buttons.forEach(function (button) {
+      button.disabled = true;
+    });
     return api("POST", "/api/family/persons/" + person.id + path, body).then(function (result) {
       if (result.ok) {
         var later = result.data && result.data.intro_at_local;
         say(later ? t("intro_later", { time: later }) : okText || "");
         return refresh();
       }
+      buttons.forEach(function (button) {
+        button.disabled = false;
+      });
       var key = "err_" + (result.data.code || "generic");
       say(TEXT[key] ? t(key) : t("err_generic"), "error");
       return null;
@@ -351,7 +403,7 @@
     var confirmBox = el("p", "confirm");
     confirmBox.hidden = true;
     if (person.status === "active") {
-      var call = el("button", "button", t("call_now"));
+      var call = el("button", "button", t("call_now", { name: person.name }));
       call.type = "button";
       call.addEventListener("click", function () {
         var hour = hourThere(person.tz);
@@ -361,8 +413,8 @@
         }
         // Outside daytime there: ask first, on the page, with the time it is for them.
         confirmBox.textContent = "";
-        confirmBox.appendChild(el("span", null, t("confirm_late", { time: timeThere(person.tz) }) + " "));
-        var yes = el("button", "button", t("yes_call"));
+        confirmBox.appendChild(el("span", null, t("confirm_late", { time: timeThere(person.tz), name: person.name }) + " "));
+        var yes = el("button", "button", t("yes_call", { name: person.name }));
         yes.type = "button";
         yes.addEventListener("click", function () {
           confirmBox.hidden = true;
@@ -388,7 +440,7 @@
       actions.appendChild(pause);
     }
     if (person.status === "pending_consent") {
-      var again = el("button", "button quiet", t("intro_again"));
+      var again = el("button", "button quiet", t("intro_again", { name: person.name }));
       again.type = "button";
       again.addEventListener("click", function () {
         act(person, "/intro", null, t("started"));
@@ -404,12 +456,49 @@
       person.neighbors.forEach(function (neighbor) {
         var row = el("li", null, neighbor.name + " · " + neighbor.phone + " · ");
         row.appendChild(el("span", "chip chip-" + neighbor.status, t("status_" + neighbor.status)));
-        if (neighbor.status === "pending_consent") {
-          // A neighbour who missed the introduction: the family talks to them first, then asks again.
-          var again = el("button", "link-button", t("neighbor_again"));
+        if (neighbor.status === "pending_consent" || neighbor.status === "declined") {
+          // A neighbour who missed the introduction, or whose "no" was recorded: the family talks to them
+          // first, then asks again. A recorded "no" needs the family to say they agreed.
+          var again = el("button", "link-button", t("neighbor_again", { name: neighbor.name }));
           again.type = "button";
+          var path = "/neighbors/" + neighbor.id + "/intro";
+          var agreed = neighbor.status === "declined" ? { agreed: true } : {};
+          var call = function (extra, shown) {
+            var hour = hourThere(person.tz);
+            if (hour >= INTRO_START && hour < INTRO_END) {
+              act(person, path, extra, t("started"));
+              return;
+            }
+            // Night there: the family chooses. They may just have talked to the neighbour, who is waiting.
+            var choice = el("span", "confirm", " " + t("neighbor_late", { time: timeThere(person.tz) }) + " ");
+            var now = el("button", "button", t("neighbor_now", { name: neighbor.name }));
+            now.type = "button";
+            now.addEventListener("click", function () {
+              act(person, path, Object.assign({ now: true }, extra), t("started"));
+            });
+            var morning = el("button", "link-button", t("neighbor_morning"));
+            morning.type = "button";
+            morning.addEventListener("click", function () {
+              act(person, path, extra, t("started"));
+            });
+            choice.appendChild(now);
+            choice.appendChild(document.createTextNode(" "));
+            choice.appendChild(morning);
+            shown.replaceWith(choice);
+          };
           again.addEventListener("click", function () {
-            act(person, "/neighbors/" + neighbor.id + "/intro", null, t("started"));
+            if (neighbor.status !== "declined") {
+              call(agreed, again);
+              return;
+            }
+            var ask = el("span", "confirm", " " + t("neighbor_declined_confirm") + " ");
+            var yes = el("button", "button", t("neighbor_agreed", { name: neighbor.name }));
+            yes.type = "button";
+            yes.addEventListener("click", function () {
+              call({ agreed: true }, ask);
+            });
+            ask.appendChild(yes);
+            again.replaceWith(ask);
           });
           row.appendChild(document.createTextNode(" "));
           row.appendChild(again);
@@ -460,19 +549,68 @@
       people.appendChild(el("p", "fine-print", t("no_people")));
       $("add-person").open = true;
     }
+    state.shape = JSON.stringify(me);
+    state.seen = {};
     var pending = me.persons.map(function (person) {
       people.appendChild(personCard(person));
       return loadEpisodes(person, person._history);
     });
-    // While a call is in progress, look again every few seconds so the timeline fills in by itself.
     Promise.all(pending).then(function (running) {
-      clearTimeout(state.timer);
-      var waiting = me.persons.some(function (person) {
-        return person.status === "pending_consent";
-      });
-      if (running.some(Boolean) || waiting) {
-        state.timer = setTimeout(refresh, 4000);
+      keepWatching(running.some(Boolean));
+    });
+  }
+
+  // While a call is in progress, look again every few seconds so the timeline fills in by itself.
+  function keepWatching(running) {
+    clearTimeout(state.timer);
+    var waiting = state.me && state.me.persons.some(function (person) {
+      return person.status === "pending_consent";
+    });
+    if (running || waiting) {
+      state.timer = setTimeout(poll, 4000);
+    }
+  }
+
+  // Only what changed is drawn again. Rebuilding every card every few seconds stopped a recording
+  // after four seconds, closed a question before it could be answered, and asked for the forecast again.
+  function poll() {
+    api("GET", "/api/family/me").then(function (result) {
+      if (!result.ok) {
+        keepWatching(true); // a passing error: look again later
+        return;
       }
+      if (JSON.stringify(result.data) !== state.shape) {
+        state.me = result.data; // a consent, a pause, a new neighbour: the cards themselves change
+        render();
+        return;
+      }
+      var checks = state.me.persons.map(function (person) {
+        return api("GET", "/api/family/persons/" + person.id + "/episodes").then(function (reply) {
+          if (!reply.ok) {
+            return true;
+          }
+          var json = JSON.stringify(reply.data);
+          var box = person._history;
+          var playing = Array.prototype.some.call(box.querySelectorAll("audio"), function (audio) {
+            return !audio.paused;
+          });
+          if (json === state.seen[person.id] || playing) {
+            return isRunning(reply.data); // unchanged, or someone is listening: redraw later
+          }
+          var opened = {};
+          Array.prototype.forEach.call(box.querySelectorAll("details[data-id]"), function (details) {
+            opened[details.dataset.id] = details.open;
+          });
+          if (reply.data.length && !(reply.data[0].id in opened)) {
+            opened[reply.data[0].id] = true; // a new episode opens, as on a fresh page
+          }
+          state.seen[person.id] = json;
+          return renderEpisodes(box, person, reply.data, opened);
+        });
+      });
+      Promise.all(checks).then(function (running) {
+        keepWatching(running.some(Boolean));
+      });
     });
   }
 

@@ -40,14 +40,15 @@
   };
   var NOTICES = {
     call_ok: "“She answered and says she is fine.”",
-    call_unwell: "URGENT: “She says she is not well. We are calling the neighbour.”",
+    call_unwell: "URGENT: “She says she is not well.”",
     neighbor_called: "“The neighbour is being called and asked to check on her.”",
     neighbor_going: "“The neighbour is on the way. We will ask shortly how it went.”",
     resolved_ok: "“The neighbour reports she is fine.”",
     needs_help_194: "URGENT: “The neighbour reports she needs help. Call the emergency number now.”",
-    nobody_reachable: "URGENT: “She is not answering and no neighbour could be reached.”",
+    nobody_reachable: "URGENT: “No neighbour can be reached, and we do not know how she is. Check now.”",
+    nobody_reachable_unwell: "URGENT: “She says she is not well, and no neighbour can be reached.”",
     neighbor_unconfirmed: "URGENT: “The neighbour went over but is no longer answering.”",
-    call_blocked: "URGENT: “The call was not made because calls are stopped.”"
+    call_blocked: "URGENT: “The call could not be made, so we do not know how she is. Check now.”"
   };
 
   function who(p) {
@@ -246,10 +247,13 @@
       "?token=" + encodeURIComponent(state.token) + "&after=" + state.after;
     fetch(url)
       .then(function (response) {
-        if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
           stopPolling();
-          refuse(response.status === 403 ? "forbidden" : "");
+          refuse("forbidden");
           return null;
+        }
+        if (!response.ok) {
+          return null; // busy or a passing error: the next poll tries again
         }
         return response.json();
       })

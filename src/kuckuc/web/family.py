@@ -35,7 +35,17 @@ GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 MAX_NEIGHBORS = 3
 MAX_PERSONS_PER_USER = 5
 _IN_PROGRESS = (EpisodeState.CALLING_PERSON, EpisodeState.CALLING_NEIGHBOR, EpisodeState.WAITING_FOLLOWUP)
-_INTRO_KINDS = (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR)
+# Never a paid or special line: every enrolment rings the number, and the checks ring it again.
+_NOT_A_PHONE = frozenset(
+    {
+        phonenumbers.PhoneNumberType.PREMIUM_RATE,
+        phonenumbers.PhoneNumberType.TOLL_FREE,
+        phonenumbers.PhoneNumberType.SHARED_COST,
+        phonenumbers.PhoneNumberType.UAN,
+        phonenumbers.PhoneNumberType.VOICEMAIL,
+        phonenumbers.PhoneNumberType.PAGER,
+    }
+)
 
 
 def verify_google_credential(credential: str, client_id: str) -> dict:
@@ -79,6 +89,12 @@ class Pause(BaseModel):
     paused: bool
 
 
+class IntroRequest(BaseModel):
+    now: bool = False  # the family confirmed on the page that it should ring even though it is night there
+    # For someone recorded as "no": the family has talked to them since, and they agreed to be asked again.
+    agreed: bool = False
+
+
 class Language(BaseModel):
     lang: Literal["sr", "en"]
 
@@ -108,7 +124,7 @@ def to_e164(raw: str, tz: str) -> str | None:
         number = phonenumbers.parse(raw, _country_by_timezone().get(tz))
     except phonenumbers.NumberParseException:
         return None
-    if not phonenumbers.is_valid_number(number):
+    if not phonenumbers.is_valid_number(number) or phonenumbers.number_type(number) in _NOT_A_PHONE:
         return None
     return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
 
@@ -140,6 +156,9 @@ def family_router(
     def refused(code: str, status: int) -> JSONResponse:
         return JSONResponse({"code": code}, status_code=status)
 
+    def minute() -> str:
+        return deps.clock.now().strftime("%Y%m%d%H%M")
+
     def running(
         person_id: str, kinds: tuple[EpisodeKind, ...] | None = None, states: tuple[EpisodeState, ...] = _IN_PROGRESS
     ) -> bool:
@@ -152,7 +171,7 @@ def family_router(
         """The engine plans introductions asked for at night for the morning; this says when, on the
         clock there. None means the calls start now."""
         now = deps.clock.now()
-        when = daytime_start(tz, now, deps.settings.quiet_start_hour, deps.settings.quiet_end_hour)
+        when = daytime_start(tz, now, deps.settings.quiet_start_hour, deps.settings.intro_end_hour)
         return when.astimezone(ZoneInfo(tz)).strftime("%H:%M") if when > now else None
 
     # --- signing in ---------------------------------------------------------------------------
@@ -368,7 +387,9 @@ def family_router(
             return refused("not_active", 409)
         if running(person.id):
             return refused("busy", 409)
-        episode_id = uuid.uuid4().hex
+        # The engine creates the episode a few seconds later. Until then a second click passes the
+        # check above, so both clicks name the same episode, and the engine starts it once.
+        episode_id = f"{person.id}:manual:{minute()}"
         deps.bus.publish("check.requested", {"person_id": person.id, "kind": "manual", "episode_id": episode_id})
         return {"episode_id": episode_id}
 
@@ -386,28 +407,36 @@ def family_router(
         person = owned_person(person_id, user)
         if person.status != PersonStatus.PENDING_CONSENT:
             return refused("not_pending", 409)
-        if running(person.id, _INTRO_KINDS, (*_IN_PROGRESS, EpisodeState.SCHEDULED)):
+        if running(person.id, (EpisodeKind.INTRO,), (*_IN_PROGRESS, EpisodeState.SCHEDULED)):
             return refused("busy", 409)  # one is under way, or planned for the morning
-        deps.bus.publish("intro.requested", {"person_id": person.id})
+        deps.bus.publish("intro.requested", {"person_id": person.id, "episode_id": f"{person.id}:intro:{minute()}"})
         return {"ok": True, "intro_at_local": intro_at_local(person.tz)}
 
     @router.post("/api/family/persons/{person_id}/neighbors/{neighbor_id}/intro", status_code=202)
-    def neighbor_intro_again(person_id: str, neighbor_id: str, user: User = Depends(current_user)):
+    def neighbor_intro_again(
+        person_id: str, neighbor_id: str, body: IntroRequest | None = None, user: User = Depends(current_user)
+    ):
         """For a neighbour who missed the introduction: the family talks to them, then asks again."""
         person = owned_person(person_id, user)
         neighbor = deps.store.get_neighbor(neighbor_id)
         if neighbor is None or neighbor.person_id != person.id:
             raise HTTPException(status_code=404)
-        if neighbor.status != PersonStatus.PENDING_CONSENT:
+        if neighbor.status not in (PersonStatus.PENDING_CONSENT, PersonStatus.DECLINED):
             return refused("not_pending", 409)
+        if neighbor.status == PersonStatus.DECLINED and not (body and body.agreed):
+            # A recorded "no" is asked again only once the family says the neighbour agreed to it.
+            return refused("agreed_needed", 409)
         planned_or_running = (*_IN_PROGRESS, EpisodeState.SCHEDULED)
         if any(
             e.kind == EpisodeKind.INTRO_NEIGHBOR and e.neighbor_id == neighbor.id and e.state in planned_or_running
             for e in deps.store.list_episodes(person.id, limit=20)
         ):
             return refused("busy", 409)
-        deps.bus.publish("intro.requested", {"neighbor_id": neighbor.id})
-        return {"ok": True, "intro_at_local": intro_at_local(person.tz)}
+        now = bool(body and body.now)
+        intro_id = f"{neighbor.id}:intro:{minute()}"  # two quick clicks start one introduction
+        deps.bus.publish("intro.requested", {"neighbor_id": neighbor.id, "now": now, "episode_id": intro_id})
+        log.info("neighbour %s asked again (was %s)", neighbor.id, neighbor.status.value)
+        return {"ok": True, "intro_at_local": None if now else intro_at_local(person.tz)}
 
     # --- Telegram -----------------------------------------------------------------------------
 
@@ -427,7 +456,10 @@ def family_router(
         user = deps.store.find_user_by_link_code(words[1])
         if user is None:
             return {"method": "sendMessage", "chat_id": chat_id, "text": NOT_LINKED}
-        deps.store.put_user(user.model_copy(update={"telegram_chat_id": str(chat_id)}))
+        # A link works once: a new code replaces it, so a forwarded or reused link can never move the
+        # family's messages, urgent ones included, to another chat.
+        fresh = secrets.token_urlsafe(18)
+        deps.store.put_user(user.model_copy(update={"telegram_chat_id": str(chat_id), "telegram_link_code": fresh}))
         return {"method": "sendMessage", "chat_id": chat_id, "text": LINKED[user.lang]}
 
     return router

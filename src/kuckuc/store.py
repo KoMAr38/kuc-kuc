@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Protocol
@@ -55,6 +56,8 @@ class Store(Protocol):
     ) -> bool: ...
     def count_person_calls(self, person_id: str, day: date) -> int: ...
     def list_calls_for_episode(self, episode_id: str) -> list[CallRecord]: ...
+    def claim_recording(self, call_id: str, n: int) -> bool: ...
+    def start_dialing(self, call_id: str, at: datetime) -> bool: ...
 
     def add_timeline(self, episode_id: str, type: str, public: dict[str, str]) -> None: ...
     def list_timeline(self, episode_id: str, after_seq: int = 0) -> list[TimelineEvent]: ...
@@ -63,9 +66,10 @@ class Store(Protocol):
 
     def put_demo_session(self, s: DemoSession) -> None: ...
     def get_demo_session_by_token(self, token: str) -> DemoSession | None: ...
-    def count_demo_runs(self, phone_hash: str, day: date) -> int: ...
-    def count_ip_runs(self, ip_hash: str, day: date) -> int: ...
-    def record_demo_run(self, phone_hash: str, ip_hash: str, day: date) -> None: ...
+    def demo_count(self, day: date, key: str) -> int: ...
+    def reserve_demo(
+        self, day: date, quotas: list[tuple[str, int, str]], usd: float, cap_usd: float
+    ) -> str | None: ...
     def add_demo_spend(self, day: date, usd: float) -> float: ...
     def get_demo_spend(self, day: date) -> float: ...
 
@@ -90,10 +94,12 @@ class MemoryStore:
         self._alerts: dict[str, Alert] = {}
         self._episodes: dict[str, Episode] = {}
         self._calls: dict[str, CallRecord] = {}
+        self._recording_claims: set[tuple[str, int]] = set()
         self._timeline: dict[str, list[TimelineEvent]] = {}
         self._demo_sessions: dict[str, DemoSession] = {}
-        self._demo_runs: list[tuple[str, str, date]] = []
+        self._demo_counts: dict[tuple[date, str], int] = {}
         self._demo_spend: dict[date, float] = {}
+        self._demo_lock = threading.Lock()
         self._stat_docs: dict[str, dict] = {}
 
     # users
@@ -205,12 +211,13 @@ class MemoryStore:
         return True
 
     def count_person_calls(self, person_id: str, day: date) -> int:
-        """Calls to the person themself on that UTC day. Blocked calls never rang, so they do not count."""
+        """Calls to the person themself on that day where they live (older calls: the UTC day).
+        Blocked calls never rang, so they do not count."""
         count = 0
         for c in self._calls.values():
             if c.target != Target.PERSON or c.status == "blocked":
                 continue
-            if c.created_at.astimezone(UTC).date() != day:
+            if (c.local_day or c.created_at.astimezone(UTC).date().isoformat()) != day.isoformat():
                 continue
             ep = self._episodes.get(c.episode_id)
             if ep is not None and ep.person_id == person_id:
@@ -220,6 +227,22 @@ class MemoryStore:
     def list_calls_for_episode(self, episode_id: str) -> list[CallRecord]:
         found = [c for c in self._calls.values() if c.episode_id == episode_id]
         return [c.model_copy(deep=True) for c in sorted(found, key=lambda c: c.created_at)]
+
+    def start_dialing(self, call_id: str, at: datetime) -> bool:
+        """Moves a queued call to "dialing"; True for the first caller only, so a task delivered
+        twice rings once."""
+        call = self._calls.get(call_id)
+        if call is None or call.status != "queued":
+            return False
+        self._calls[call_id] = call.model_copy(update={"status": "dialing", "placed_at": at})
+        return True
+
+    def claim_recording(self, call_id: str, n: int) -> bool:
+        """True for the first caller only: a recording delivered twice is handled once."""
+        if (call_id, n) in self._recording_claims:
+            return False
+        self._recording_claims.add((call_id, n))
+        return True
 
     def all_calls(self) -> list[CallRecord]:
         return [c.model_copy(deep=True) for c in self._calls.values()]
@@ -243,18 +266,30 @@ class MemoryStore:
     def get_demo_session_by_token(self, token: str) -> DemoSession | None:
         return _copy(self._demo_sessions.get(token))
 
-    def count_demo_runs(self, phone_hash: str, day: date) -> int:
-        return sum(1 for ph, _, d in self._demo_runs if ph == phone_hash and d == day)
+    def demo_count(self, day: date, key: str) -> int:
+        return self._demo_counts.get((day, key), 0)
 
-    def count_ip_runs(self, ip_hash: str, day: date) -> int:
-        return sum(1 for _, ip, d in self._demo_runs if ip == ip_hash and d == day)
-
-    def record_demo_run(self, phone_hash: str, ip_hash: str, day: date) -> None:
-        self._demo_runs.append((phone_hash, ip_hash, day))
+    def reserve_demo(
+        self, day: date, quotas: list[tuple[str, int, str]], usd: float, cap_usd: float
+    ) -> str | None:
+        """Counts one use of every ``(key, limit, refusal)`` quota and adds ``usd`` to the day's
+        spend, all at once or not at all. Returns the refusal of the first quota at its limit,
+        "budget" when the spend would pass ``cap_usd``, or None when reserved."""
+        with self._demo_lock:
+            for key, limit, refusal in quotas:
+                if self._demo_counts.get((day, key), 0) >= limit:
+                    return refusal
+            if self._demo_spend.get(day, 0.0) + usd > cap_usd:
+                return "budget"
+            for key, _, _ in quotas:
+                self._demo_counts[(day, key)] = self._demo_counts.get((day, key), 0) + 1
+            self._demo_spend[day] = round(self._demo_spend.get(day, 0.0) + usd, 4)
+            return None
 
     def add_demo_spend(self, day: date, usd: float) -> float:
-        self._demo_spend[day] = round(self._demo_spend.get(day, 0.0) + usd, 4)
-        return self._demo_spend[day]
+        with self._demo_lock:
+            self._demo_spend[day] = round(self._demo_spend.get(day, 0.0) + usd, 4)
+            return self._demo_spend[day]
 
     def get_demo_spend(self, day: date) -> float:
         return self._demo_spend.get(day, 0.0)

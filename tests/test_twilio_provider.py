@@ -158,3 +158,14 @@ def test_balance_is_read_as_dollars():
 def test_unreadable_balance_raises_so_the_demo_can_close_itself():
     with pytest.raises(TelephonyError):
         verify(FakeHttp([(500, {})])).balance_usd()
+
+
+def test_only_the_providers_number_errors_count_as_a_refused_number():
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    assert TelephonyError("x", status=400, code="21215").refused is True  # no permission for that country
+    assert TelephonyError("x", status=400, code="21211").refused is True  # not a valid number
+    assert TelephonyError("x", status=401, code="20003").refused is False  # our credentials
+    assert TelephonyError("x", status=404, code="20404").refused is False  # our account id
+    assert TelephonyError("x", status=400, code="21212").refused is False  # our own From number
+    assert TelephonyError("x", status=429, code="20429").refused is False

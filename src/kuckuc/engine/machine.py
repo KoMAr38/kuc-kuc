@@ -90,6 +90,11 @@ def step(ep: Episode, ev: Input, neighbor_count: int) -> tuple[Episode, list[Act
     if ep.state == EpisodeState.CLOSED:
         return ep, []
     if isinstance(ev, CallBlocked):
+        if ev.reason == "refused":
+            return _refused(ep, neighbor_count)
+        if ep.kind in (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR):
+            # Nobody is waiting for help on an introduction: the family starts it again when they can.
+            return _close(ep, Result.BLOCKED, [Notify("intro_blocked", urgent=False)])
         return _close(ep, Result.BLOCKED, [Notify("call_blocked", urgent=True)])
     if isinstance(ev, Due):
         return _start(ep) if ep.state == EpisodeState.SCHEDULED else (ep, [])
@@ -161,7 +166,8 @@ def _call_neighbor(
     ep: Episode, index: int, neighbor_count: int, before: list[Action]
 ) -> tuple[Episode, list[Action]]:
     if index >= neighbor_count:
-        return _close(ep, Result.UNREACHABLE, [*before, Notify("nobody_reachable", urgent=True)])
+        key = "nobody_reachable_unwell" if ep.unwell else "nobody_reachable"
+        return _close(ep, Result.UNREACHABLE, [*before, Notify(key, urgent=True)])
     ep = ep.model_copy(
         update={"state": EpisodeState.CALLING_NEIGHBOR, "neighbor_index": index, "neighbor_attempts": 1}
     )
@@ -207,6 +213,21 @@ def _consent(ep: Episode, answer: Answer, target: Target) -> tuple[Episode, list
         ep = ep.model_copy(update={"neighbor_attempts": ep.neighbor_attempts + 1})
         return ep, [PlaceCall(Target.NEIGHBOR, 0, ScriptKind.INTRO_NEIGHBOR, PERSON_RETRY_S)]
     return _close(ep, Result.NO_CONSENT, [Notify("consent_missing")])
+
+
+def _refused(ep: Episode, neighbor_count: int) -> tuple[Episode, list[Action]]:
+    """The phone network refused the number, so the phone never rang. Trying again would only
+    repeat the refusal, and "no answer" would be untrue. A check goes on as if nobody answered
+    after the last try, so someone is still sent; the family hears what really happened."""
+    if ep.kind in (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR):
+        return _close(ep, Result.BLOCKED, [Notify("intro_refused", urgent=False)])
+    if ep.state == EpisodeState.CALLING_PERSON:
+        if ep.kind == EpisodeKind.HEADSUP:
+            return _close(ep, Result.NOT_DELIVERED, [Notify("call_refused", urgent=True)])
+        return _call_neighbor(ep, 0, neighbor_count, [Notify("call_refused", urgent=True)])
+    if ep.state == EpisodeState.CALLING_NEIGHBOR:
+        return _call_neighbor(ep, ep.neighbor_index + 1, neighbor_count, [Notify("neighbor_refused", urgent=True)])
+    return _close(ep, Result.UNCONFIRMED, [Notify("neighbor_unconfirmed", urgent=True)])
 
 
 def _close(ep: Episode, result: Result, before: list[Action]) -> tuple[Episode, list[Action]]:

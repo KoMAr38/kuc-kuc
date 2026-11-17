@@ -72,3 +72,20 @@ def test_demo_and_simulated_episodes_are_not_watched(sys):
 def test_every_check_remembers_when_it_was_due(sys):
     ep_id = request_check(sys)
     assert sys.deps.store.get_episode(ep_id).due_at == T0
+
+
+def test_a_check_that_moves_while_the_watchdog_looks_is_left_alone(sys):
+    ep_id = request_check(sys)
+    complete(sys, only_new_call(sys), Answer.NEEDS_HELP)
+    sys.deps.queue.tasks.clear()
+    sys.clock.advance(46 * 60)
+    listed = sys.deps.store.list_open_episodes
+
+    def listed_then_moved():
+        found = listed()
+        complete(sys, only_new_call(sys), Answer.YES)  # the neighbour answers just after the listing
+        return found
+
+    sys.deps.store.list_open_episodes = listed_then_moved
+    assert run_watchdog(sys.deps) == []
+    assert sys.deps.store.get_episode(ep_id).state == EpisodeState.WAITING_FOLLOWUP

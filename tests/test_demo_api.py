@@ -131,7 +131,7 @@ def test_run_adds_spend_and_third_run_is_refused(web):
     assert web.deps.store.get_demo_spend(TODAY) > 0
     r = web.post("/api/demo/run", json={"token": token, "scenario": "cold"})
     assert r.json()["code"] == "phone_limit" and r.status_code == 429
-    assert web.deps.store.get_demo_spend(TODAY) == pytest.approx(0.06 + 2 * (2 * 0.014))  # one code, two runs of calls
+    assert web.deps.store.get_demo_spend(TODAY) == pytest.approx(0.06 + 2 * (4 * 0.014))  # one code, two runs of calls
 
 
 def test_spent_budget_refuses_before_a_code_is_sent(web):
@@ -181,7 +181,7 @@ def test_timeline_never_contains_the_phone_number(web):
 def test_the_session_does_not_keep_the_number_itself(web):
     token = verified_token(web)
     session = web.deps.store.get_demo_session_by_token(token)
-    assert session.phone == "" and "4155550100" not in session.phone_hash and session.country == "US"
+    assert "phone" not in session.model_dump() and "4155550100" not in session.phone_hash and session.country == "US"
 
 
 def test_the_services_own_number_is_refused_with_a_clear_reason(web):
@@ -220,3 +220,60 @@ def test_a_code_that_could_not_be_sent_costs_nothing(web):
     web.deps.verify.start = down
     assert web.post("/api/demo/verify/start", json={"phone": PHONE, "channel": "sms"}).status_code == 502
     assert web.deps.store.get_demo_spend(TODAY) == 0
+
+
+# --- audit 17 Nov ---------------------------------------------------------------------------
+
+
+def test_runs_started_at_the_same_moment_never_pass_the_limit(web):
+    # Every request read the count before any of them wrote it, so a script got six runs out of two.
+    import threading
+
+    token = verified_token(web)
+    web.deps.bus.publish = lambda type, data: None  # only the limits are under test here
+    parallel = 6
+    together = threading.Barrier(parallel)
+    read = web.deps.store.get_demo_spend
+
+    def read_at_the_same_moment(day):
+        value = read(day)
+        try:
+            together.wait(timeout=3)
+        except threading.BrokenBarrierError:
+            pass
+        return value
+
+    web.deps.store.get_demo_spend = read_at_the_same_moment
+    codes = []
+
+    def run():
+        codes.append(web.post("/api/demo/run", json={"token": token, "scenario": "heat"}).status_code)
+
+    threads = [threading.Thread(target=run) for _ in range(parallel)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert codes.count(200) == 2, codes
+
+
+def test_the_demo_day_is_product_hunts_day_in_california(web):
+    # 03:00 UTC on the 21st is still the 20th, launch day, in California.
+    from datetime import date
+
+    web.sys.clock.advance(18 * 3600)
+    web.post("/api/demo/verify/start", json={"phone": PHONE, "channel": "sms"})
+    assert web.deps.store.get_demo_spend(date(2026, 11, 20)) == pytest.approx(0.06)
+    assert web.deps.store.get_demo_spend(date(2026, 11, 21)) == 0
+
+
+def test_an_odd_token_is_refused_without_reaching_the_store(web):
+    # Firestore raises on a token with a slash in it; a scanner must get a refusal, not a server error.
+    def strict(token):
+        if "/" in token:
+            raise ValueError("not a valid document path")
+        return None
+
+    web.deps.store.get_demo_session_by_token = strict
+    r = web.get("/api/demo/timeline/x", params={"token": "../x", "after": 0})
+    assert r.status_code == 403

@@ -25,6 +25,25 @@ if [ -f deploy/live.env ]; then
 fi
 
 SERVICES="${SERVICES:-voice engine web forecast-scan watchdog loadtest telegram-webhook}"
+
+# Never swap the servers a running phone call depends on: on 17 November a release in the middle of
+# a call made one answer reach two servers and turned it into "unclear" (scripts/live_calls.py).
+# Checked right before each swap, not before the build: a call can start while the image builds.
+# Waits up to ten minutes for the call to end, then stops.
+guard_live_calls() {
+  [ -n "${FORCE_DEPLOY:-}" ] && return 0
+  local python="${PYTHON:-.venv/Scripts/python}"
+  [ -x "$python" ] || python=".venv/bin/python"
+  for _ in $(seq 1 20); do
+    if PYTHONPATH=src GCP_PROJECT="$PROJECT" KUCKUC_PROJECT="$PROJECT" "$python" scripts/live_calls.py; then
+      return 0
+    fi
+    echo "   a call is under way; waiting for it to end" >&2
+    sleep 30
+  done
+  echo "A call has been under way for ten minutes. Deploy again later, or set FORCE_DEPLOY=1." >&2
+  exit 1
+}
 TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
 IMAGE="$REGION-docker.pkg.dev/$PROJECT/$REPO/app:$TAG"
 
@@ -41,10 +60,6 @@ for name in GEMINI_MODEL GEMINI_LOCATION GEMINI_THINKING_LEVEL TTS_VOICE_SR TTS_
   [ -n "$value" ] && ENV="$ENV|KUCKUC_$name=$value"
 done
 
-TWILIO_SECRETS="KUCKUC_TWILIO_ACCOUNT_SID=twilio-account-sid:latest"
-TWILIO_SECRETS="$TWILIO_SECRETS,KUCKUC_TWILIO_AUTH_TOKEN=twilio-auth-token:latest"
-TWILIO_SECRETS="$TWILIO_SECRETS,KUCKUC_TWILIO_VERIFY_SID=twilio-verify-sid:latest"
-TWILIO_SECRETS="$TWILIO_SECRETS,KUCKUC_TWILIO_FROM_NUMBER=twilio-from-number:latest"
 
 have_secret() { gcloud secrets describe "$1" --project "$PROJECT" >/dev/null 2>&1; }
 
@@ -71,9 +86,16 @@ for service in $SERVICES; do
   case "$service" in
     voice)
       say "Deploying voice (public: the phone company calls it; it checks every request itself)"
-      allow_secrets voice-sa twilio-account-sid twilio-auth-token twilio-verify-sid twilio-from-number
+      # Voice dials and never verifies numbers, so it does not get the Verify service's id.
+      allow_secrets voice-sa twilio-account-sid twilio-auth-token twilio-from-number
+      gcloud secrets remove-iam-policy-binding twilio-verify-sid --project "$PROJECT" --quiet \
+        --member "serviceAccount:voice-sa@$SA_DOMAIN" --role roles/secretmanager.secretAccessor >/dev/null 2>&1 || true
+      VOICE_SECRETS="KUCKUC_TWILIO_ACCOUNT_SID=twilio-account-sid:latest"
+      VOICE_SECRETS="$VOICE_SECRETS,KUCKUC_TWILIO_AUTH_TOKEN=twilio-auth-token:latest"
+      VOICE_SECRETS="$VOICE_SECRETS,KUCKUC_TWILIO_FROM_NUMBER=twilio-from-number:latest"
+      guard_live_calls
       run_deploy voice kuckuc.voice.main:app --allow-unauthenticated \
-        --timeout 30 --max-instances 20 --cpu-boost --set-secrets "$TWILIO_SECRETS"
+        --timeout 30 --max-instances 20 --cpu-boost --set-secrets "$VOICE_SECRETS"
       ;;
     engine)
       say "Deploying engine (private: only Pub/Sub and Cloud Tasks can reach it)"
@@ -85,6 +107,7 @@ for service in $SERVICES; do
       else
         echo "   no telegram-bot-token secret yet: family notices go to the log only"
       fi
+      guard_live_calls
       run_deploy engine kuckuc.engine.main:app "${ENGINE_FLAGS[@]}"
       gcloud run services add-iam-policy-binding engine --project "$PROJECT" --region "$REGION" --quiet \
         --member "serviceAccount:$INVOKER_SA" --role roles/run.invoker >/dev/null

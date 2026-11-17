@@ -71,10 +71,12 @@ All in `images/`. Upload the logo first, then the gallery in this order:
 | `gallery-3-live-demo.png` | The live demo timeline |
 | `gallery-4-architecture.png` | The parts and how they are connected |
 | `gallery-5-who-it-is-for.png` | Who it is for, and what it is not |
+| `gallery-6-family-page.png` | What the family sees (made-up person and test numbers) |
+| `gallery-7-under-load.png` | The load test: 2,000 people, 14 instances, then zero |
 | `gallery-1-landing.png` | Optional extra: a screenshot of the real landing page |
 
 The five gallery images are rendered from the pages in `images/src/` by `images/render.py`
 (see `images/README.txt`), so their text can be corrected and the images rebuilt.
 
-Still to come before launch: a screenshot of the family page (with made-up data) and the
-instance chart from the load test.
+Uploaded on 17 November 2026 with the owner's go-ahead: the gallery now has seven images
+(the five above, then the family page and the load test).

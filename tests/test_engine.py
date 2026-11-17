@@ -1,13 +1,15 @@
 import base64
 import json
 
+import pytest
+
 from factories import make_episode, make_neighbor, make_person
 from fastapi.testclient import TestClient
 from helpers import complete, only_call, only_new_call, real_calls, request_check, seed_person_calls
 
 from kuckuc.engine.app import handle_event
 from kuckuc.engine.guards import call_block_reason
-from kuckuc.engine.notify import KEYS, render_message
+from kuckuc.engine.notify import render_message
 from kuckuc.models import (
     Answer,
     EpisodeKind,
@@ -303,24 +305,22 @@ def test_timer_starts_a_scheduled_episode_once(sys):
 # --- messages to the family ------------------------------------------------------------------
 
 
-def test_urgent_messages_exist_in_both_languages():
-    for key in KEYS:
-        for lang in ("sr", "en"):
-            text = render_message(key, lang, {"name": "N", "neighbor": "K", "hazard": "cold"})
-            assert text and "{" not in text
-    assert "194" in render_message("needs_help_194", "sr", {"name": "N", "neighbor": "K"})
-
-
 def test_exact_urgent_wording_in_serbian():
     p = {"name": "baba Milena", "neighbor": "Dragan"}
     assert render_message("needs_help_194", "sr", p) == (
         "HITNO: Dragan javlja da baba Milena treba pomoć. Pozovi hitnu pomoć 194."
     )
     assert render_message("nobody_reachable", "sr", p) == (
-        "HITNO: baba Milena se ne javlja i nijedan komšija nije dostupan. Pozovi je ili nekoga ko je blizu."
+        "HITNO: nijedan komšija nije dostupan, a ne znamo kako je baba Milena. "
+        "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
+    )
+    assert render_message("nobody_reachable_unwell", "sr", p) == (
+        "HITNO: baba Milena kaže da nije dobro, a nijedan komšija nije dostupan. "
+        "Pozovi odmah nekoga ko je blizu ili hitnu pomoć 194."
     )
     assert render_message("call_blocked", "sr", p) == (
-        "HITNO: poziv za baba Milena nije obavljen jer je sistem zaustavio pozive. Proveri je sam."
+        "HITNO: poziv nije obavljen, pa ne znamo kako je baba Milena. "
+        "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
     )
 
 
@@ -390,3 +390,149 @@ def test_the_demo_still_shows_what_the_family_would_be_told(sys):
     (call,) = [c for c in sys.deps.store.all_calls() if c.episode_id == "demo-e"]
     complete(sys, call, Answer.OK)
     assert "family_notified" in [e.type for e in sys.deps.store.list_timeline("demo-e")]
+
+
+# --- audit 17 Nov: steps that must not be lost, messages that must be true -------------------
+
+
+def completion(call, answer):
+    return {
+        "call_id": call.id,
+        "episode_id": call.episode_id,
+        "target": call.target.value,
+        "script": call.script.value,
+        "answer": answer.value,
+    }
+
+
+def test_a_completion_published_twice_under_new_message_ids_counts_once(sys):
+    # The publisher retries after a lost acknowledgement, and the copy carries a new message id.
+    ep_id = request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NO_ANSWER, None, None)
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NO_ANSWER))
+    handle_event(sys.deps, "m-2", "call.completed", completion(call, Answer.NO_ANSWER))
+    assert sys.deps.store.get_episode(ep_id).person_attempts == 2
+
+
+def test_a_store_that_gives_up_on_a_busy_write_gets_the_event_again_instead_of_dropping_it(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+
+    def give_up(*args, **kwargs):
+        raise ValueError("Failed to commit transaction in 5 attempts.")  # what Firestore raises
+
+    sys.deps.store.update_episode = give_up
+    with pytest.raises(ValueError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.OK))
+
+
+def test_a_planned_call_whose_timer_was_not_queued_gets_it_when_the_alert_comes_again(sys):
+    from factories import TOMORROW, make_alert
+
+    original, failed = sys.deps.queue.enqueue_due, []
+
+    def fail_once(episode_id, at):
+        if not failed:
+            failed.append(episode_id)
+            raise RuntimeError("queue unavailable")
+        return original(episode_id, at)
+
+    sys.deps.queue.enqueue_due = fail_once
+    alert = make_alert(person_id="p1", hazard="cold", day=TOMORROW)
+    sys.deps.store.create_alert(alert)
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "alert.created", {"alert_id": alert.id})
+    handle_event(sys.deps, "m-1", "alert.created", {"alert_id": alert.id})  # delivered again
+    timers = {t.id for t in sys.deps.queue.tasks if t.kind == "due"}
+    assert {f"p1:{TOMORROW}:headsup", f"p1:{TOMORROW}:check"} <= timers
+
+
+def test_with_no_neighbour_who_said_yes_the_family_is_not_promised_one(sys):
+    for neighbor in sys.deps.store.list_neighbors("p1"):
+        sys.deps.store.put_neighbor(neighbor.model_copy(update={"status": PersonStatus.PENDING_CONSENT}))
+    request_check(sys)
+    complete(sys, only_new_call(sys), Answer.NEEDS_HELP)
+    assert sent_keys(sys) == ["call_unwell", "nobody_reachable_unwell"]
+    for key in sent_keys(sys):
+        text = render_message(key, "sr", {"name": "baba Milena", "neighbor": ""})
+        assert "Zovemo" not in text and "se ne javlja" not in text
+
+
+def test_a_blocked_introduction_is_not_reported_as_an_urgent_check(sys):
+    sys.deps.store.runtime.kill_switch = True
+    sys.deps.bus.publish("intro.requested", {"neighbor_id": "n1", "now": True})
+    assert sent_keys(sys)[-1] == "intro_blocked" and sys.deps.notifier.sent[-1].urgent is False
+
+
+def test_the_neighbour_who_went_is_the_one_asked_how_she_is_even_if_another_agrees_meanwhile(sys):
+    dragan = sys.deps.store.get_neighbor("n1")
+    sys.deps.store.put_neighbor(dragan.model_copy(update={"status": PersonStatus.PENDING_CONSENT}))
+    request_check(sys)
+    complete(sys, only_new_call(sys), Answer.NEEDS_HELP)
+    ask = only_new_call(sys)
+    assert ask.neighbor_id == "n2"  # Rada is the only one who has said yes
+    sys.deps.store.put_neighbor(dragan)  # Dragan says yes while Rada is on her way
+    complete(sys, ask, Answer.YES)
+    follow_up = only_new_call(sys)
+    assert (follow_up.neighbor_id, follow_up.to) == ("n2", "+15005550008")
+
+
+def test_a_heads_up_never_rings_in_the_same_minute_as_another_planned_call(sys):
+    from datetime import timedelta
+
+    from factories import TODAY, TOMORROW, make_alert
+
+    for hazard, day in (("wind", TOMORROW), ("heat", TODAY)):  # either order
+        alert = make_alert(person_id="p1", hazard=hazard, day=day, value=36.0)
+        sys.deps.store.create_alert(alert)
+        sys.deps.bus.publish("alert.created", {"alert_id": alert.id})
+    headsup = sys.deps.store.get_episode(f"p1:{TOMORROW}:headsup")
+    check = sys.deps.store.get_episode(f"p1:{TODAY}:check")
+    assert abs(headsup.due_at - check.due_at) == timedelta(hours=1)
+
+
+def test_the_daily_limit_counts_calls_in_the_persons_own_day(sys):
+    # Six calls by the afternoon in Los Angeles; at 16:30 there it is already tomorrow in UTC.
+    person = sys.deps.store.get_person("p1")
+    sys.deps.store.put_person(person.model_copy(update={"tz": "America/Los_Angeles"}))
+    seed_person_calls(sys, "p1", 6)
+    sys.clock.advance(int(15.5 * 3600))
+    request_check(sys)
+    assert "call_blocked" in sent_keys(sys)
+
+
+def test_every_message_exists_in_both_languages():
+    from kuckuc.engine.notify import _MESSAGES
+
+    assert set(_MESSAGES["sr"]) == set(_MESSAGES["en"])
+    for key in _MESSAGES["sr"]:
+        for lang in ("sr", "en"):
+            text = render_message(key, lang, {"name": "N", "neighbor": "K", "hazard": "cold"})
+            assert text and "{" not in text and "(" + key + ")" not in text
+
+
+def test_every_urgent_message_starts_with_the_word_urgent():
+    p = {"name": "N", "neighbor": "K", "hazard": "heat"}
+    keys = (
+        "call_unwell", "needs_help_194", "nobody_reachable", "nobody_reachable_unwell", "neighbor_unconfirmed",
+        "call_blocked", "lost_track", "call_refused", "neighbor_refused",
+    )
+    for key in keys:
+        assert render_message(key, "sr", p).startswith("HITNO"), key
+        assert render_message(key, "en", p).startswith("URGENT"), key
+
+
+def test_a_store_that_runs_a_change_twice_still_queues_one_call(sys):
+    # Firestore runs a transaction again when another write got there first; the actions of the
+    # first run must not be carried out too.
+    store = sys.deps.store
+    original = store.update_episode
+
+    def twice(episode_id, fn):
+        fn(store.get_episode(episode_id))
+        return original(episode_id, fn)
+
+    store.update_episode = twice
+    request_check(sys)
+    assert len(real_calls(sys)) == 1

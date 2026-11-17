@@ -12,8 +12,10 @@ import logging
 import uuid
 from dataclasses import replace
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import Body, FastAPI, Response
+from pydantic import ValidationError
 
 from kuckuc.deps import Deps
 from kuckuc.engine.guards import call_block_reason
@@ -80,21 +82,39 @@ def create_engine_app(deps: Deps) -> FastAPI:
 
 
 def handle_event(deps: Deps, event_id: str, type: str, data: dict) -> None:
+    """A malformed event is dropped, or it would come back forever. Any failure while handling a
+    well-formed one is raised, so the event is delivered again: a step is never lost to a hiccup."""
+    try:
+        if type == "call.completed":
+            ev: Input = CallDone(Target(data["target"]), ScriptKind(data["script"]), Answer(data["answer"]))
+        elif type == "call.blocked":
+            ev = CallBlocked(str(data.get("reason", "")))
+        elif type == "check.requested":
+            str(data["person_id"]), EpisodeKind(data["kind"])
+        elif type == "intro.requested":
+            str(data.get("neighbor_id") or data["person_id"])
+        elif type == "alert.created":
+            str(data["alert_id"])
+        else:
+            log.info("event %s ignored", type)
+            return
+        episode_id = str(data["episode_id"]) if type in ("call.completed", "call.blocked") else ""
+    except (KeyError, ValueError, TypeError):
+        log.exception("malformed %s event dropped", type)
+        return
+    # A call ends once. Its report is recognised by the call's id, so a copy the publisher sent again
+    # under a new message id counts once.
+    seen_as = f"call:{data['call_id']}" if data.get("call_id") else event_id
     try:
         if type == "check.requested":
             _start_check(deps, event_id, data)
         elif type == "intro.requested":
             _start_intro(deps, event_id, data)
-        elif type == "call.completed":
-            done = CallDone(Target(data["target"]), ScriptKind(data["script"]), Answer(data["answer"]))
-            _advance(deps, data["episode_id"], event_id, done)
-        elif type == "call.blocked":
-            _advance(deps, data["episode_id"], event_id, CallBlocked(str(data.get("reason", ""))))
         elif type == "alert.created":
             _schedule_alert(deps, data["alert_id"])
         else:
-            log.info("event %s ignored", type)
-    except (KeyError, ValueError, TypeError):
+            _advance(deps, episode_id, seen_as, ev)
+    except ValidationError:
         log.exception("malformed %s event dropped", type)
 
 
@@ -156,13 +176,24 @@ def _start_intro(deps: Deps, event_id: str, data: dict) -> None:
         created_at=now,
         updated_at=now,
     )
-    # The first call from Kuc-kuc is never the one that wakes someone: at night it waits for the morning.
-    when = daytime_start(person.tz, now, deps.settings.quiet_start_hour, deps.settings.quiet_end_hour)
-    if when <= now:
+    # The first call from Kuc-kuc is never the one that wakes someone: at night it waits for the morning,
+    # unless the family asked for it now (they have just talked to that person, who is waiting by the phone).
+    when = daytime_start(person.tz, now, deps.settings.quiet_start_hour, deps.settings.intro_end_hour)
+    if data.get("now") or when <= now:
         start_episode(deps, episode)
     elif deps.store.create_episode(episode.model_copy(update={"due_at": when})):
         deps.queue.enqueue_due(episode.id, when)
         deps.store.add_timeline(episode.id, "episode_scheduled", {"kind": kind.value, "hazard": ""})
+    else:
+        _requeue_if_scheduled(deps, episode.id)
+
+
+def _requeue_if_scheduled(deps: Deps, episode_id: str) -> None:
+    """An episode that exists may never have got its timer (the queue failed once): queue it again.
+    The queue keeps one task per episode and time, so a timer that exists is not doubled."""
+    existing = deps.store.get_episode(episode_id)
+    if existing is not None and existing.state == EpisodeState.SCHEDULED and existing.due_at is not None:
+        deps.queue.enqueue_due(existing.id, existing.due_at)
 
 
 def _schedule_alert(deps: Deps, alert_id: str) -> None:
@@ -178,8 +209,14 @@ def _schedule_alert(deps: Deps, alert_id: str) -> None:
     planned = plan_calls(
         alert, person.tz, now, already_running, deps.settings.quiet_start_hour, deps.settings.quiet_end_hour
     )
+    # Two planned calls in the same minute would meet a busy line: the second moves an hour later.
+    taken = {
+        e.due_at for e in deps.store.list_episodes(alert.person_id, limit=20) if e.state == EpisodeState.SCHEDULED
+    }
     scheduled = 0
     for kind, when in planned:
+        if when in taken:
+            when = when + timedelta(hours=1)
         episode = Episode(
             id=f"{alert.person_id}:{alert.day}:{kind.value}",
             person_id=alert.person_id,
@@ -193,7 +230,10 @@ def _schedule_alert(deps: Deps, alert_id: str) -> None:
         if deps.store.create_episode(episode):
             deps.queue.enqueue_due(episode.id, when)
             deps.store.add_timeline(episode.id, "episode_scheduled", {"kind": kind.value, "hazard": alert.hazard})
+            taken.add(when)
             scheduled += 1
+        else:
+            _requeue_if_scheduled(deps, episode.id)
     if scheduled:
         # Said only when a call really is on its way, and therefore only once.
         deps.notifier.send(
@@ -229,14 +269,18 @@ def _advance(deps: Deps, episode_id: str, event_id: str | None, ev: Input) -> No
     if current is None:
         log.warning("event for unknown episode %s ignored", episode_id)
         return
-    neighbor_count = _neighbor_count(deps, current)
+    # Who may be called is fixed when the episode starts, so a neighbour who says yes in the middle
+    # of an escalation never changes who is asked, or who is asked "how is she?".
+    live = None if current.kind in _SELF_NEIGHBORS else [n.id for n in _active_neighbors(deps, current.person_id)]
     actions: list[Action] = []
 
     def apply(ep: Episode) -> Episode | None:
         actions.clear()  # the store may run this more than once
         if event_id and event_id in ep.seen_event_ids:
             return None
-        after, todo = step(ep, ev, neighbor_count)
+        if live is not None and ep.neighbor_ids is None:
+            ep = ep.model_copy(update={"neighbor_ids": live})
+        after, todo = step(ep, ev, _neighbor_count(ep))
         actions.extend(todo)
         seen = [*ep.seen_event_ids, event_id][-SEEN_EVENTS_KEPT:] if event_id else ep.seen_event_ids
         return after.model_copy(update={"seen_event_ids": seen, "updated_at": deps.clock.now()})
@@ -250,8 +294,15 @@ def _active_neighbors(deps: Deps, person_id: str) -> list[Neighbor]:
     return [n for n in deps.store.list_neighbors(person_id) if n.status == PersonStatus.ACTIVE]
 
 
-def _neighbor_count(deps: Deps, ep: Episode) -> int:
-    return 1 if ep.kind in _SELF_NEIGHBORS else len(_active_neighbors(deps, ep.person_id))
+def _neighbor_count(ep: Episode) -> int:
+    return 1 if ep.kind in _SELF_NEIGHBORS else len(ep.neighbor_ids or [])
+
+
+def _neighbor_ids(deps: Deps, ep: Episode) -> list[str]:
+    """The neighbours this episode may call, in order: fixed when it started."""
+    if ep.neighbor_ids is not None:
+        return ep.neighbor_ids
+    return [n.id for n in _active_neighbors(deps, ep.person_id)]
 
 
 def _current_neighbor(deps: Deps, ep: Episode) -> Neighbor | None:
@@ -259,8 +310,12 @@ def _current_neighbor(deps: Deps, ep: Episode) -> Neighbor | None:
         return deps.store.get_neighbor(ep.neighbor_id) if ep.neighbor_id else None
     if ep.kind in _SELF_NEIGHBORS:
         return None
-    active = _active_neighbors(deps, ep.person_id)
-    return active[ep.neighbor_index] if ep.neighbor_index < len(active) else None
+    ids = _neighbor_ids(deps, ep)
+    if ep.neighbor_index >= len(ids):
+        return None
+    neighbor = deps.store.get_neighbor(ids[ep.neighbor_index])
+    # One who withdrew since the start is not called.
+    return neighbor if neighbor is not None and neighbor.status == PersonStatus.ACTIVE else None
 
 
 def _execute(deps: Deps, ep: Episode, actions: list[Action]) -> None:
@@ -286,8 +341,7 @@ def _place_call(deps: Deps, ep: Episode, person: Person, action: PlaceCall) -> N
     )
     to, neighbor_id = person.phone, None
     if action.target == Target.PERSON and ep.kind not in _SELF_NEIGHBORS:
-        active = [n for n in deps.store.list_neighbors(person.id) if n.status == PersonStatus.ACTIVE]
-        words = replace(words, has_neighbor=bool(active))
+        words = replace(words, has_neighbor=bool(_neighbor_ids(deps, ep)))
     if action.target == Target.NEIGHBOR:
         if ep.kind in _SELF_NEIGHBORS:
             words = replace(words, name=_AS_NEIGHBOR[person.lang], neighbor=person.name)
@@ -319,6 +373,7 @@ def _place_call(deps: Deps, ep: Episode, person: Person, action: PlaceCall) -> N
         lang=person.lang,
         params=params,
         created_at=deps.clock.now(),
+        local_day=deps.clock.now().astimezone(ZoneInfo(person.tz)).date().isoformat(),
     )
     delay_s = call_delay_s(deps, ep, action)
     deps.store.put_call(call)

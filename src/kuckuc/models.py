@@ -140,6 +140,8 @@ class Episode(BaseModel):
     neighbor_id: str | None = None
     person_attempts: int = 0
     neighbor_index: int = 0
+    # The neighbours who had said yes when the episode started, in order; None until it starts.
+    neighbor_ids: list[str] | None = None
     neighbor_attempts: int = 0
     followup_attempts: int = 0
     unwell: bool = False
@@ -162,12 +164,16 @@ class CallRecord(BaseModel):
     to: str
     lang: Lang
     params: dict[str, str]
-    status: Literal["queued", "placed", "completed", "blocked"] = "queued"
+    status: Literal["queued", "dialing", "placed", "completed", "blocked"] = "queued"
     answer: Answer | None = None
     transcript: str | None = None
     recording_key: str | None = None
     provider_sid: str | None = None
     created_at: datetime
+    # When dialling began. A call is queued long before it rings (a follow-up 20 minutes ahead).
+    placed_at: datetime | None = None
+    # The date where the person lives when the call was queued (YYYY-MM-DD): the daily cap counts it.
+    local_day: str | None = None
 
 
 class TimelineEvent(BaseModel):
@@ -182,7 +188,6 @@ class TimelineEvent(BaseModel):
 class DemoSession(BaseModel):
     id: str
     token: str
-    phone: str
     phone_hash: str
     country: str
     expires_at: datetime

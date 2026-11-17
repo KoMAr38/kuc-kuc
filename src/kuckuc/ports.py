@@ -88,7 +88,6 @@ class QueuedTask:
     kind: Literal["call", "due"]
     id: str  # call id or episode id
     at: datetime
-    sim: bool = False
 
 
 class MemoryQueue:
@@ -97,10 +96,13 @@ class MemoryQueue:
         self.tasks: list[QueuedTask] = []
 
     def enqueue_call(self, call_id: str, delay_s: int, sim: bool = False) -> None:
-        self.tasks.append(QueuedTask("call", call_id, self._clock.now() + timedelta(seconds=delay_s), sim))
+        self.tasks.append(QueuedTask("call", call_id, self._clock.now() + timedelta(seconds=delay_s)))
 
     def enqueue_due(self, episode_id: str, at: datetime) -> None:
-        self.tasks.append(QueuedTask("due", episode_id, at))
+        # Like Cloud Tasks with named tasks: the same timer queued twice exists once.
+        task = QueuedTask("due", episode_id, at)
+        if task not in self.tasks:
+            self.tasks.append(task)
 
 
 class MemoryBlobs:

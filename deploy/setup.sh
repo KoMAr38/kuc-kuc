@@ -58,7 +58,7 @@ if ! gcloud firestore databases describe --database="(default)" --project "$PROJ
     --location="${FIRESTORE_LOCATION:-$REGION}" --type=firestore-native
 fi
 # Demo data and demo sessions delete themselves a day after they are written.
-for group in demo_sessions demo_runs persons episodes calls timeline; do
+for group in demo_sessions demo_runs persons episodes calls timeline claims; do
   gcloud firestore fields ttls update expires_at --project "$PROJECT" \
     --collection-group="$group" --enable-ttl --async >/dev/null 2>&1 || true
 done
@@ -68,10 +68,14 @@ gcloud storage buckets describe "gs://$BUCKET" --project "$PROJECT" >/dev/null 2
   gcloud storage buckets create "gs://$BUCKET" --project "$PROJECT" --location "$REGION" \
     --uniform-bucket-level-access --public-access-prevention
 gcloud storage buckets update "gs://$BUCKET" --lifecycle-file deploy/lifecycle.json >/dev/null
-for sa in voice-sa web-sa; do
-  gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --quiet \
-    --member "serviceAccount:$sa@$SA_DOMAIN" --role roles/storage.objectUser >/dev/null
-done
+# Voice writes speech and recordings; web only reads recordings for the family page, so the public
+# service can never change what is played on a call. An older setup gave web write access: taken back.
+gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --quiet \
+  --member "serviceAccount:voice-sa@$SA_DOMAIN" --role roles/storage.objectUser >/dev/null
+gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --quiet \
+  --member "serviceAccount:web-sa@$SA_DOMAIN" --role roles/storage.objectViewer >/dev/null
+gcloud storage buckets remove-iam-policy-binding "gs://$BUCKET" --quiet \
+  --member "serviceAccount:web-sa@$SA_DOMAIN" --role roles/storage.objectUser >/dev/null 2>&1 || true
 
 say "Container registry"
 gcloud artifacts repositories describe "$REPO" --project "$PROJECT" --location "$REGION" >/dev/null 2>&1 ||

@@ -135,7 +135,7 @@ def test_all_neighbours_decline_is_urgent_unreachable():
 def test_no_neighbours_goes_straight_to_family():
     ep, acts = run(EpisodeKind.CHECK, [Due(), pa(Answer.NEEDS_HELP)], neighbors=0)
     assert calls(acts, Target.NEIGHBOR) == []
-    assert Notify("nobody_reachable", True) in acts
+    assert Notify("nobody_reachable_unwell", True) in acts  # she said she is not well: the family is told so
     assert ep.result == Result.UNREACHABLE
 
 
@@ -280,3 +280,28 @@ def test_step_does_not_change_the_episode_it_was_given():
     after, _ = step(ep, Due(), 2)
     assert ep.state == EpisodeState.SCHEDULED and ep.person_attempts == 0
     assert after.state == EpisodeState.CALLING_PERSON and after.person_attempts == 1
+
+
+def test_a_number_the_network_refuses_is_reported_as_such_not_as_no_answer():
+    # Her number refused during a check: no pointless retries, the neighbour is asked at once,
+    # and the family hears that the network refused the number, not that she did not answer.
+    ep, acts = run(EpisodeKind.CHECK, [Due(), CallBlocked("refused")])
+    assert acts[-3:] == [
+        Notify("call_refused", True),
+        PlaceCall(Target.NEIGHBOR, 0, ScriptKind.NEIGHBOR_ASK_SILENT),
+        Notify("neighbor_called"),
+    ]
+    assert ep.state == EpisodeState.CALLING_NEIGHBOR
+    # A neighbour's number refused: the next neighbour is asked.
+    _, acts = run(EpisodeKind.CHECK, [Due(), pa(Answer.NEEDS_HELP), CallBlocked("refused")])
+    assert acts[-3:] == [
+        Notify("neighbor_refused", True),
+        PlaceCall(Target.NEIGHBOR, 1, ScriptKind.NEIGHBOR_ASK_UNWELL),
+        Notify("neighbor_called"),
+    ]
+    # No neighbour left: the family is told nobody could be reached.
+    ep, acts = run(EpisodeKind.CHECK, [Due(), CallBlocked("refused")], neighbors=0)
+    assert ep.result == Result.UNREACHABLE and Notify("call_refused", True) in acts
+    for kind in (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR):  # no alarm: check the number
+        _, acts = run(kind, [Due(), CallBlocked("refused")])
+        assert acts[-2:] == [Notify("intro_refused", False), Close(Result.BLOCKED)], kind

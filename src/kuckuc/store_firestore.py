@@ -190,7 +190,7 @@ class FirestoreStore:
             c.id,
             c,
             person_id=episode.person_id if episode else "",
-            day=c.created_at.astimezone(UTC).date().isoformat(),
+            day=c.local_day or c.created_at.astimezone(UTC).date().isoformat(),
             **self._demo_ttl(c.episode_id),
         )
 
@@ -210,6 +210,29 @@ class FirestoreStore:
                 {"calls_total": firestore.Increment(1), "calls_by_day": {today: firestore.Increment(1)}},
                 merge=True,
             )
+
+    def claim_recording(self, call_id: str, n: int) -> bool:
+        """Creating the claim fails if another server created it first, so exactly one wins."""
+        claim = self._col("calls").document(call_id).collection("claims").document(str(n))
+        try:
+            # A claim matters only while the call lasts; the TTL policy removes it a week later.
+            claim.create({"at": firestore.SERVER_TIMESTAMP, "expires_at": self._now() + timedelta(days=7)})
+        except gexc.Conflict:
+            return False
+        return True
+
+    def start_dialing(self, call_id: str, at: datetime) -> bool:
+        ref = self._col("calls").document(call_id)
+
+        @firestore.transactional
+        def run(transaction) -> bool:
+            snap = ref.get(transaction=transaction)
+            if not snap.exists or snap.get("status") != "queued":
+                return False
+            transaction.update(ref, {"status": "dialing", "placed_at": at})
+            return True
+
+        return run(self._db.transaction())
 
     def complete_call(
         self, id: str, answer: Answer, transcript: str | None, recording_key: str | None
@@ -268,21 +291,38 @@ class FirestoreStore:
     def get_demo_session_by_token(self, token: str) -> DemoSession | None:
         return self._get("demo_sessions", token, DemoSession)
 
-    def count_demo_runs(self, phone_hash: str, day: date) -> int:
-        return self._count(self._where("demo_runs", phone_hash=phone_hash, day=day.isoformat()))
+    def demo_count(self, day: date, key: str) -> int:
+        snap = self._col("demo_runs").document(f"{day.isoformat()}:{key}").get()
+        return int((snap.to_dict() or {}).get("n", 0)) if snap.exists else 0
 
-    def count_ip_runs(self, ip_hash: str, day: date) -> int:
-        return self._count(self._where("demo_runs", ip_hash=ip_hash, day=day.isoformat()))
+    def reserve_demo(
+        self, day: date, quotas: list[tuple[str, int, str]], usd: float, cap_usd: float
+    ) -> str | None:
+        # Counters live in demo_runs (one document per day and key), which already expires by TTL.
+        # Reading and writing them in one transaction is what stops parallel requests passing a limit.
+        refs = [(self._col("demo_runs").document(f"{day.isoformat()}:{key}"), limit, refusal) for key, limit, refusal in quotas]
+        spend_ref = self._col("demo_days").document(day.isoformat())
+        expires = self._now() + timedelta(days=2)
 
-    def record_demo_run(self, phone_hash: str, ip_hash: str, day: date) -> None:
-        self._col("demo_runs").add(
-            {
-                "phone_hash": phone_hash,
-                "ip_hash": ip_hash,
-                "day": day.isoformat(),
-                "expires_at": self._now() + timedelta(days=2),
-            }
-        )
+        @firestore.transactional
+        def run(transaction) -> str | None:
+            counts = []
+            for ref, limit, refusal in refs:
+                snap = ref.get(transaction=transaction)
+                counts.append(int((snap.to_dict() or {}).get("n", 0)) if snap.exists else 0)
+            spend = spend_ref.get(transaction=transaction)
+            spent = float((spend.to_dict() or {}).get("usd", 0.0)) if spend.exists else 0.0
+            for (ref, limit, refusal), n in zip(refs, counts, strict=True):
+                if n >= limit:
+                    return refusal
+            if spent + usd > cap_usd:
+                return "budget"
+            for (ref, _, _), n in zip(refs, counts, strict=True):
+                transaction.set(ref, {"n": n + 1, "day": day.isoformat(), "expires_at": expires})
+            transaction.set(spend_ref, {"usd": round(spent + usd, 4)}, merge=True)
+            return None
+
+        return run(self._db.transaction())
 
     def add_demo_spend(self, day: date, usd: float) -> float:
         self._col("demo_days").document(day.isoformat()).set({"usd": firestore.Increment(usd)}, merge=True)

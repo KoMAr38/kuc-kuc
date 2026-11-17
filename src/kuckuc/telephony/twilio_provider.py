@@ -17,10 +17,31 @@ API = "https://api.twilio.com"
 VERIFY_API = "https://verify.twilio.com/v2"
 RECORDING_RETRIES = 3
 RECORDING_RETRY_WAIT_S = 0.5
+# Twilio's errors about the dialled number itself: invalid, unreachable, not allowed for that country,
+# blocked, not a number, not verified. Every other refusal is about our own account or request.
+NUMBER_REFUSALS = frozenset({"21211", "21214", "21215", "21216", "21217", "21219"})
 
 
 class TelephonyError(RuntimeError):
-    pass
+    """``status`` is the provider's HTTP status (0 if none came back) and ``code`` its error code.
+    Neither ever contains the dialled number."""
+
+    def __init__(self, message: str, status: int = 0, code: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+    @property
+    def refused(self) -> bool:
+        """The provider refused the dialled number (invalid, unreachable, no permission for its
+        country): trying again changes nothing, and the family should check the number."""
+        return self.status == 400 and self.code in NUMBER_REFUSALS
+
+    @property
+    def ours(self) -> bool:
+        """The provider refused our own account or request (credentials, account id, our number):
+        the family can do nothing about the number, and trying again changes nothing."""
+        return 400 <= self.status < 500 and self.status != 429 and not self.refused
 
 
 def _error(what: str, reply) -> TelephonyError:
@@ -29,7 +50,9 @@ def _error(what: str, reply) -> TelephonyError:
         code = str(reply.json().get("code", ""))
     except Exception:
         pass
-    return TelephonyError(f"{what}: HTTP {reply.status_code}" + (f", provider code {code}" if code else ""))
+    return TelephonyError(
+        f"{what}: HTTP {reply.status_code}" + (f", provider code {code}" if code else ""), reply.status_code, code
+    )
 
 
 class TwilioTelephony:

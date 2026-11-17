@@ -12,10 +12,11 @@ import time
 from collections.abc import Callable
 from xml.sax.saxutils import escape, quoteattr
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, Response
 
 from kuckuc.deps import Deps
 from kuckuc.models import Answer, CallRecord
+from kuckuc.telephony.twilio_provider import TelephonyError
 from kuckuc.scripts import closing, neutral_closing, params_from_dict, reask, render
 
 log = logging.getLogger(__name__)
@@ -24,8 +25,11 @@ RECORD_MAX_S = 8
 RECORD_SILENCE_S = 3
 NOT_REACHED = frozenset({"busy", "no-answer", "failed", "canceled"})
 # A person who answers and puts the receiver straight down produces two reports at once:
-# the recording and the hang-up. The hang-up waits this long for the recording to be understood.
-HANGUP_GRACE_S = 12
+# the recording and the hang-up. The hang-up waits this long for the recording to be understood:
+# longer than fetching it plus two tries of the model, shorter than the provider's own wait.
+HANGUP_GRACE_S = 14
+# How long Twilio waits for our reply to a webhook before it plays its own error message, in English.
+PROVIDER_WAIT_S = 15
 # About eight rings: an older person may need that long to reach a landline across the house.
 RING_TIMEOUT_S = 40
 # A demo visitor holds their phone; a long ring would only make them wait through each retry.
@@ -57,7 +61,12 @@ def create_voice_app(
         timeline: tuple[str, dict[str, str]] | None = None,
     ) -> bool:
         """Record the outcome and tell the engine, exactly once per call.
-        The timeline row is written first, so it reads in order with what the engine does next."""
+        The timeline row is written first, so it reads in order with what the engine does next.
+        When this try heard nothing, what an earlier try of the same call heard is kept."""
+        stored = deps.store.get_call(call.id)
+        if stored is not None:
+            transcript = transcript or stored.transcript
+            recording_key = recording_key or stored.recording_key
         if not deps.store.complete_call(call.id, answer, transcript, recording_key):
             return False
         if timeline:
@@ -77,6 +86,8 @@ def create_voice_app(
 
     def block(call: CallRecord, reason: str) -> None:
         deps.store.patch_call(call.id, status="blocked")
+        if reason != "refused":
+            deps.store.add_timeline(call.episode_id, "call_blocked", {"role": call.target.value, "reason": reason})
         deps.bus.publish("call.blocked", {"call_id": call.id, "episode_id": call.episode_id, "reason": reason})
         log.warning("call %s blocked: %s", call.id, reason)
 
@@ -128,9 +139,14 @@ def create_voice_app(
             for text in sorted(texts):
                 deps.tts.audio_key(text, call.lang)
         except Exception:
+            # A passing failure: the call did not go through, and is tried again like any such call.
             log.exception("call %s: speech synthesis failed", call.id)
-            block(call, "tts_failed")
+            finish(call, Answer.NO_ANSWER, None, None, ("call_failed", {"role": call.target.value}))
             return {"ok": True}
+
+        # A task delivered twice (the queue retries when this takes long) must ring once.
+        if not deps.store.start_dialing(call.id, deps.clock.now()):
+            return {"ok": True, "skipped": True}
 
         try:
             sid = deps.telephony.place_call(
@@ -141,11 +157,22 @@ def create_voice_app(
                 time_limit_s=60,
             )
         except Exception as exc:
-            # Do not log the exception text: provider errors can quote the dialled number.
-            log.error("call %s could not be placed (%s)", call.id, type(exc).__name__)
+            # Our own TelephonyError holds only the HTTP status and the provider's error code, so it is
+            # logged; any other error's text could quote the dialled number, so only its type is.
+            reason = str(exc) if isinstance(exc, TelephonyError) else type(exc).__name__
+            log.error("call %s could not be placed (%s)", call.id, reason)
+            if isinstance(exc, TelephonyError) and exc.refused:
+                # The phone never rang: say so, rather than "no answer", and do not try a refusal again.
+                deps.store.add_timeline(call.episode_id, "call_refused", {"role": call.target.value})
+                block(call, "refused")
+                return {"ok": True}
+            if isinstance(exc, TelephonyError) and exc.ours:
+                # Our own account or request was refused: not the number's fault, and not "no answer".
+                block(call, "provider_error")
+                return {"ok": True}
             finish(call, Answer.NO_ANSWER, None, None, ("call_failed", {"role": call.target.value}))
             return {"ok": True}
-        deps.store.patch_call(call.id, status="placed", provider_sid=sid)
+        deps.store.patch_call(call.id, status="placed", provider_sid=sid)  # placed_at was set on dialling
         deps.store.add_timeline(call.episode_id, "call_placed", {"role": call.target.value})
         log.info("call %s placed", call.id)
         return {"ok": True}
@@ -165,11 +192,18 @@ def create_voice_app(
         return _twiml(_play(opening), *record_verbs(call.id, 1))
 
     @app.post("/recording/{call_id}")
-    def on_recording(call_id: str, n: int = 1, empty: int = 0, params: dict = Depends(twilio_form)) -> Response:
+    def on_recording(
+        background: BackgroundTasks, call_id: str, n: int = 1, empty: int = 0, params: dict = Depends(twilio_form)
+    ) -> Response:
         call = deps.store.get_call(call_id)
         if call is None:
             return _twiml("<Hangup/>")
         if call.status == "completed":
+            return goodbye(call, None)
+        if not deps.store.claim_recording(call.id, n):
+            # The same answer reached another server too (the provider retried, for instance during a
+            # release). That server handles it; this one only says goodbye and promises nothing.
+            log.warning("call %s: recording %d already being handled elsewhere", call.id, n)
             return goodbye(call, None)
 
         answer, transcript, recording_key = Answer.UNCLEAR, "", None
@@ -180,7 +214,8 @@ def create_voice_app(
                 key = f"recordings/{call.id}-{n}.wav"
                 deps.blobs.put(key, wav, "audio/wav")
                 recording_key = key
-                deps.telephony.delete_recording(recording_url)
+                # Our copy is stored; the provider's is deleted once the answer is handled and replied to.
+                background.add_task(deps.telephony.delete_recording, recording_url)
                 heard = deps.interpreter.interpret(wav, call.lang, call.question)
                 answer, transcript = heard.answer, heard.transcript
             except Exception as exc:
@@ -188,6 +223,8 @@ def create_voice_app(
                 answer, transcript = Answer.UNCLEAR, ""
 
         if answer == Answer.UNCLEAR and n == 1:
+            # Keep what was heard: if the call ends without a second answer, the family can still hear this one.
+            deps.store.patch_call(call.id, transcript=transcript or None, recording_key=recording_key)
             try:
                 again = audio_url(reask(call.question, call.lang), call)
                 return _twiml(_play(again), *record_verbs(call.id, 2))

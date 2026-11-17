@@ -67,8 +67,8 @@ no clock, no I/O, every rule a unit test.
 - A watchdog every ten minutes closes a check that has stopped moving (a lost task, event or
   status report) and tells the family at once. A message that did not reach the family is shown
   as not delivered, never as sent.
-- Scheduled calls and introductions only between 08:00 and 20:00 where the person lives; an
-  introduction asked for at night waits for 08:00. An escalation that has started always finishes.
+- Scheduled calls only between 08:00 and 20:00 where the person lives; introductions until 23:00,
+  and one asked for later waits for 08:00 unless the family chooses to call now. An escalation that has started always finishes.
 - The public demo calls only a number its owner has just verified, in four countries, twice a day
   per number, inside a daily budget in dollars, and closes itself when the account balance is low.
 - Phone numbers never appear in logs, public pages, this repository or its test fixtures.

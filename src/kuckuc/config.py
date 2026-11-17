@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     max_person_calls_per_day: int = 6
     quiet_start_hour: int = 8
     quiet_end_hour: int = 20
+    # Introductions (asking consent) may ring until 23:00 there; later ones wait for quiet_start_hour.
+    intro_end_hour: int = 23
 
     # Hazard thresholds.
     heat_apparent_c: float = 35.0

@@ -7,6 +7,7 @@ neighbour for nothing, but it can never make it report "fine" when nobody said s
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -15,8 +16,17 @@ from kuckuc.models import Answer, Lang, Question
 
 log = logging.getLogger(__name__)
 
-# About a quarter of a second of 8 kHz telephone audio. Anything shorter is silence or a click.
+# A quarter of a second of 8 kHz, 16-bit telephone audio. Shorter is a click, or an answer cut off so
+# short that the model cannot tell "da" from "ne": on 17 Nov a clipped 0.13 s "Da" was judged "no"
+# 2 times out of 3, while every real answer that day lasted half a second or more. It is asked again.
 MIN_AUDIO_BYTES = 4000
+# Both tries of the model together get MODEL_BUDGET_S: the first up to FIRST_TRY_S, the second what
+# is left, at least SECOND_TRY_MIN_S. The budget plus fetching the recording fits inside the hang-up
+# wait and the provider's 15 s wait (voice/app.py). Measured 17 Nov: the model answers in 2-3 s,
+# at times in 5-9 s; two fixed 5 s tries cut off answers that were on their way.
+MODEL_BUDGET_S = 10.0  # leaves room for connecting, which a time limit does not count
+FIRST_TRY_S = 7.0
+SECOND_TRY_MIN_S = 2.0
 MAX_TRANSCRIPT_CHARS = 300
 
 ALLOWED: dict[Question, dict[str, Answer]] = {
@@ -28,7 +38,6 @@ ALLOWED: dict[Question, dict[str, Answer]] = {
 
 @dataclass(frozen=True)
 class Interpretation:
-    human: bool
     answer: Answer
     transcript: str
 
@@ -63,7 +72,17 @@ _LABEL_MEANING = {
         '- "ok": they say they are fine. A plain yes counts.\n'
         '- "needs_help": they say they are not fine, or mention any trouble. A plain no counts.'
     ),
-    Question.YES_NO: '- "yes": they clearly agree.\n- "no": they clearly decline.',
+    # Measured 17 Nov on the same recordings: with "they clearly agree" alone, "Da, hvala." came back
+    # "unclear" 2 times out of 3 and a clipped "Da" "no" 2 of 3; with these lines, "yes" 3 of 3 and
+    # never "no".
+    Question.YES_NO: (
+        '- "yes": they agree. In Serbian "da", "može", "hoću", "važi", "naravno", also with thanks '
+        '("da, hvala"), are yes.\n'
+        '- "no": they decline. In Serbian "ne", "neću", "ne može", "ne treba", also with thanks '
+        '("ne, hvala"), are no.\n'
+        "One short word is enough when it is clearly heard. If the recording is cut off or too short "
+        'to tell "da" from "ne", choose "unclear".'
+    ),
     Question.NEIGHBOR_REPORT: (
         '- "ok": the neighbour saw the person and reports they are fine.\n'
         '- "needs_help": the person needs help, is unwell, did not open the door or could not be found.'
@@ -90,25 +109,36 @@ def build_prompt(lang: Lang, question: Question) -> str:
 
 
 class GeminiInterpreter:
-    """``generate(audio_wav, prompt)`` returns the model's JSON reply as a dict. It is injected so
-    the fail-safe logic here can be tested without the model, and so the model can be swapped."""
+    """``generate(audio_wav, prompt, timeout_s)`` returns the model's JSON reply as a dict. It is
+    injected so the fail-safe logic here can be tested without the model, and so the model can be swapped."""
 
-    def __init__(self, generate: Callable[[bytes, str], dict]) -> None:
+    def __init__(self, generate: Callable[[bytes, str, float], dict], clock: Callable[[], float] = time.monotonic) -> None:
         self._generate = generate
+        self._clock = clock
 
     def interpret(self, audio: bytes, lang: Lang, question: Question) -> Interpretation:
         if len(audio) < MIN_AUDIO_BYTES:
-            return Interpretation(False, Answer.UNCLEAR, "")
-        try:
-            raw = self._generate(audio, build_prompt(lang, question))
-        except Exception:
-            log.exception("interpretation failed; treating the answer as unclear")
-            return Interpretation(False, Answer.UNCLEAR, "")
+            return Interpretation(Answer.UNCLEAR, "")
+        prompt = build_prompt(lang, question)
+        raw = None
+        started = self._clock()
+        for attempt in (1, 2):  # a passing timeout must not decide an answer; both fit the provider's wait
+            if attempt == 1:
+                timeout = FIRST_TRY_S
+            else:
+                timeout = max(SECOND_TRY_MIN_S, MODEL_BUDGET_S - (self._clock() - started))
+            try:
+                raw = self._generate(audio, prompt, timeout)
+                break
+            except Exception:
+                if attempt == 2:
+                    log.exception("interpretation failed twice; treating the answer as unclear")
+                    return Interpretation(Answer.UNCLEAR, "")
+                log.warning("interpretation failed once; asking again")
         if not isinstance(raw, dict):
-            return Interpretation(False, Answer.UNCLEAR, "")
+            return Interpretation(Answer.UNCLEAR, "")
         transcript = raw.get("transcript")
         return Interpretation(
-            human=raw.get("human") is True,
             answer=to_answer(question, raw),
             transcript=transcript[:MAX_TRANSCRIPT_CHARS] if isinstance(transcript, str) else "",
         )
@@ -124,4 +154,4 @@ class FakeInterpreter:
     def interpret(self, audio: bytes, lang: Lang, question: Question) -> Interpretation:
         self.calls.append((len(audio), lang, question))
         answer = self.answers.pop(0) if self.answers else Answer.UNCLEAR
-        return Interpretation(answer != Answer.UNCLEAR, answer, "")
+        return Interpretation(answer, "")

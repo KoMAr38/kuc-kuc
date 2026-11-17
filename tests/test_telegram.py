@@ -105,7 +105,7 @@ def test_a_failed_message_never_breaks_the_caller_and_never_logs_the_token(caplo
     def down(url, body):
         raise RuntimeError(f"cannot reach {url}")
 
-    TelegramNotifier(linked_store(), "SECRET-TOKEN", down).send("u1", "call_ok", {"name": "N"}, False)
+    TelegramNotifier(linked_store(), "SECRET-TOKEN", down, sleep=lambda s: None).send("u1", "call_ok", {"name": "N"}, False)
     assert "SECRET-TOKEN" not in caplog.text and "not delivered" in caplog.text
 
 
@@ -209,7 +209,7 @@ def test_send_says_whether_the_message_was_delivered():
     def down(url, body):
         raise RuntimeError("blocked by the user")
 
-    assert TelegramNotifier(linked_store(), "T", down).send("u1", "call_ok", {"name": "N"}, False) is False
+    assert TelegramNotifier(linked_store(), "T", down, sleep=lambda s: None).send("u1", "call_ok", {"name": "N"}, False) is False
 
 
 def test_without_a_bot_a_notice_is_an_error_in_the_log_and_counts_as_not_delivered(caplog):
@@ -220,3 +220,39 @@ def test_without_a_bot_a_notice_is_an_error_in_the_log_and_counts_as_not_deliver
     caplog.set_level(logging.INFO)
     assert LogNotifier().send("u1", "needs_help_194", {"name": "N"}, True) is False
     assert any(r.levelno >= logging.ERROR and "needs_help_194" in r.getMessage() for r in caplog.records)
+
+
+def test_a_message_that_fails_once_is_sent_again():
+    posts, waits = [], []
+
+    def hiccup(url, body):
+        posts.append(body)
+        if len(posts) == 1:
+            raise RuntimeError("Telegram did not answer in time")
+
+    notifier = TelegramNotifier(linked_store(), "T", hiccup, sleep=waits.append)
+    assert notifier.send("u1", "needs_help_194", {"name": "N", "neighbor": "K"}, True) is True
+    assert len(posts) == 2 and waits == [1]
+
+
+def test_a_message_that_keeps_failing_is_given_up_after_three_tries():
+    posts = []
+
+    def down(url, body):
+        posts.append(body)
+        raise RuntimeError("down")
+
+    notifier = TelegramNotifier(linked_store(), "T", down, sleep=lambda s: None)
+    assert notifier.send("u1", "needs_help_194", {"name": "N", "neighbor": "K"}, True) is False
+    assert len(posts) == 3
+
+
+def test_a_link_works_once_so_nobody_can_take_over_the_messages_later(web):
+    # A forwarded "Connect Telegram" link used to move every message, urgent ones too, to whoever opened it.
+    web.deps.store.put_user(User(uid="u1", email="a@b.c", telegram_link_code="abc123"))
+    start = {"message": {"chat": {"id": 777}, "text": "/start abc123"}}
+    web.post("/telegram/webhook/s3cret", json=start)
+    later = {"message": {"chat": {"id": 999}, "text": "/start abc123"}}
+    web.post("/telegram/webhook/s3cret", json=later)
+    user = web.deps.store.get_user("u1")
+    assert user.telegram_chat_id == "777" and user.telegram_link_code not in ("", "abc123")

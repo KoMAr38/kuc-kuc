@@ -41,10 +41,8 @@ def plan_calls(
     check_at = _at(alert.day, HEAT_CHECK_HOUR if alert.hazard == "heat" else CHECK_HOUR, zone)
     if check_at > now:
         planned.append((EpisodeKind.CHECK, check_at))
-    else:
-        local = now.astimezone(zone)
-        if local.date() == alert.day and quiet_start_hour <= local.hour < quiet_end_hour:
-            planned.append((EpisodeKind.CHECK, now))
+    elif now.astimezone(zone).date() == alert.day and daytime_start(tz, now, quiet_start_hour, quiet_end_hour) == now:
+        planned.append((EpisodeKind.CHECK, now))  # the day has come and it is daytime there: check at once
     return planned
 
 

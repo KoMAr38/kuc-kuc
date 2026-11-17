@@ -128,20 +128,13 @@ def test_everything_the_call_might_say_is_synthesised_before_the_phone_rings(voi
     voice.client.post("/calls/start", json={"call_id": "c1"})
     said = {text for text, lang in voice.deps.tts.spoken}
     assert "Dobar dan, baba Milena. Ovde Kuc-kuc. Danas je veoma hladno. Zovem da proverim: jeste li dobro?" in said
-    assert "Nisam vas razumela. Jeste li dobro? Recite da ili ne." in said
+    assert "Nisam vas razumela. Recite da ili ne: jeste li dobro?" in said
     assert {
         "Hvala, baba Milena. Čuvajte se. Doviđenja.",
         "Javiću komšiji da svrati do vas. Doviđenja.",
         "Hvala. Doviđenja.",
     } <= said
     assert {lang for _, lang in voice.deps.tts.spoken} == {"sr"}
-
-
-def test_tts_failure_blocks_instead_of_calling(voice):
-    voice.deps.tts = RaisingTts()
-    voice.client.post("/calls/start", json={"call_id": "c1"})
-    assert voice.deps.telephony.placed == [] and voice.deps.bus.published[-1][1]["reason"] == "tts_failed"
-    assert voice.deps.store.get_call("c1").status == "blocked"
 
 
 def test_a_call_the_phone_company_refuses_counts_as_no_answer(voice):
@@ -151,6 +144,43 @@ def test_a_call_the_phone_company_refuses_counts_as_no_answer(voice):
     voice.deps.telephony.place_call = refuse
     assert voice.client.post("/calls/start", json={"call_id": "c1"}).status_code == 200
     assert voice.deps.store.get_call("c1").answer == Answer.NO_ANSWER
+    assert voice.published("call.completed")[0]["answer"] == "no_answer"
+
+
+def test_a_refused_call_logs_the_phone_companys_reason_code_but_never_the_number(voice, caplog):
+    # Without the code nobody could tell that the network refused the number, rather than nobody answering.
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    def refuse(*args, **kwargs):
+        raise TelephonyError("call not placed: HTTP 400, provider code 21215")
+
+    voice.deps.telephony.place_call = refuse
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert "provider code 21215" in caplog.text and PERSON_PHONE not in caplog.text
+
+
+def test_a_number_the_network_refuses_is_reported_at_once_not_retried(voice):
+    # Retrying a refused number only repeats the refusal, and "no answer" would be untrue.
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    def refuse(*args, **kwargs):
+        raise TelephonyError("call not placed: HTTP 400, provider code 21215", status=400, code="21215")
+
+    voice.deps.telephony.place_call = refuse
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.deps.store.get_call("c1").status == "blocked"
+    assert voice.published("call.blocked")[0]["reason"] == "refused" and voice.published("call.completed") == []
+    assert "call_refused" in [e.type for e in voice.deps.store.list_timeline("e1")]
+
+
+def test_a_passing_network_failure_still_counts_as_no_answer_and_is_tried_again(voice):
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    def busy(*args, **kwargs):
+        raise TelephonyError("call not placed: HTTP 503", status=503)
+
+    voice.deps.telephony.place_call = busy
+    voice.client.post("/calls/start", json={"call_id": "c1"})
     assert voice.published("call.completed")[0]["answer"] == "no_answer"
 
 
@@ -245,7 +275,7 @@ def test_answer_goes_on_the_timeline_with_what_was_heard(voice):
         def interpret(self, audio, lang, question):
             from kuckuc.speech.interpret import Interpretation
 
-            return Interpretation(True, Answer.NEEDS_HELP, "Nije mi dobro.")
+            return Interpretation(Answer.NEEDS_HELP, "Nije mi dobro.")
 
     voice.deps.interpreter = Heard()
     voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
@@ -266,7 +296,7 @@ def test_unclear_reasks_once_then_completes_unclear(voice):
     second = voice.twilio_post("/recording/c1?n=2", {"RecordingUrl": "https://x/r2"}).text
     assert [el.tag for el in xml(second)] == ["Play", "Hangup"]
     assert voice.deps.store.get_call("c1").answer == Answer.UNCLEAR
-    assert ("Nisam vas razumela. Jeste li dobro? Recite da ili ne.", "sr") in voice.deps.tts.spoken
+    assert ("Nisam vas razumela. Recite da ili ne: jeste li dobro?", "sr") in voice.deps.tts.spoken
 
 
 def test_clear_answer_after_the_reask_counts(voice):
@@ -321,6 +351,16 @@ def test_recording_stored_and_deleted_at_provider(voice):
     assert voice.deps.store.get_call("c1").recording_key == "recordings/c1-1.wav"
 
 
+def test_a_recording_delivered_twice_is_handled_once_and_never_turns_into_unclear(voice):
+    # During a release one answer reached two servers: the first fetched it and deleted it at the
+    # provider, the second found it gone and reported "unclear" first.
+    assert voice.deps.store.claim_recording("c1", 1) is True  # the other server has it
+    reply = voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    assert reply.status_code == 200 and "<Hangup/>" in reply.text
+    assert voice.deps.telephony.fetched == [] and voice.deps.store.get_call("c1").status != "completed"
+    assert voice.published("call.completed") == []
+
+
 def test_the_interpreter_hears_the_recording_in_the_calls_language(voice):
     voice.deps.interpreter.answers = [Answer.OK]
     voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
@@ -366,9 +406,11 @@ def test_hanging_up_right_after_answering_waits_for_the_answer_to_be_understood(
     assert len(voice.sleeps) == 3
 
 
-def test_hangup_waits_at_most_twelve_seconds_before_calling_it_unclear(voice):
+def test_hangup_waits_at_most_the_grace_period_before_calling_it_unclear(voice):
+    from kuckuc.voice.app import HANGUP_GRACE_S
+
     voice.twilio_post("/status/c1", {"CallStatus": "completed"})
-    assert sum(voice.sleeps) == 12 and voice.deps.store.get_call("c1").answer == Answer.UNCLEAR
+    assert sum(voice.sleeps) == HANGUP_GRACE_S and voice.deps.store.get_call("c1").answer == Answer.UNCLEAR
 
 
 # --- audio and privacy -----------------------------------------------------------------------
@@ -395,3 +437,82 @@ def test_logs_never_contain_the_phone_number(voice, caplog):
     voice.twilio_post("/status/c1", {"CallStatus": "completed", "To": PERSON_PHONE})
     assert "5005550006" not in caplog.text
     assert "c1" in caplog.text  # the service does log; it logs call ids, not numbers
+
+
+# --- audit 17 Nov: timing, failures, first answers ------------------------------------------
+
+
+def test_understanding_an_answer_fits_inside_the_hang_up_wait_and_the_providers_wait():
+    # Twilio waits 15 s for our reply, and a hang-up waits HANGUP_GRACE_S for the answer. Fetching the
+    # recording plus two tries of the model must fit inside both, or a heard answer becomes "unclear"
+    # and a person still on the line hears the provider's error message in English.
+    from kuckuc.speech.interpret import FIRST_TRY_S, MODEL_BUDGET_S, SECOND_TRY_MIN_S
+    from kuckuc.telephony.twilio_provider import RECORDING_RETRIES, RECORDING_RETRY_WAIT_S
+    from kuckuc.voice.app import HANGUP_GRACE_S, PROVIDER_WAIT_S
+
+    assert FIRST_TRY_S + SECOND_TRY_MIN_S <= MODEL_BUDGET_S  # both tries never take longer than the budget
+    worst = MODEL_BUDGET_S + RECORDING_RETRIES * RECORDING_RETRY_WAIT_S + 1  # +1 s to fetch and store
+    assert worst < HANGUP_GRACE_S < PROVIDER_WAIT_S
+
+
+def test_the_providers_copy_is_deleted_only_after_the_answer_is_recorded(voice):
+    # Deleting is not needed to understand the answer, so it must not delay it.
+    seen = []
+    voice.deps.telephony.delete_recording = lambda url: seen.append(voice.deps.store.get_call("c1").status)
+    voice.deps.interpreter.answers = [Answer.OK]
+    voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    assert seen == ["completed"]
+
+
+def test_a_passing_speech_failure_counts_as_no_answer_so_the_check_goes_on(voice):
+    # One failed synthesis used to close the whole check, even with a neighbour about to be called.
+    voice.deps.tts = RaisingTts()
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.deps.telephony.placed == [] and voice.published("call.blocked") == []
+    assert voice.published("call.completed")[0]["answer"] == "no_answer"
+    assert ("call_failed", {"role": "person"}) in voice.timeline()
+
+
+def test_our_own_provider_account_errors_are_not_called_a_refused_number(voice):
+    # A rotated token (401) is our fault: the family must not be sent to check a correct number.
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    def unauthorised(*args, **kwargs):
+        raise TelephonyError("call not placed: HTTP 401, provider code 20003", status=401, code="20003")
+
+    voice.deps.telephony.place_call = unauthorised
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.published("call.blocked")[0]["reason"] == "provider_error"
+    assert ("call_blocked", {"role": "person", "reason": "provider_error"}) in voice.timeline()
+    assert "call_refused" not in [type for type, _ in voice.timeline()]
+
+
+def test_a_call_is_claimed_before_dialling_so_a_second_delivery_cannot_dial_again(voice):
+    # The queue delivers a task again when the first delivery takes too long; both saw "queued".
+    statuses = []
+    original = voice.deps.telephony.place_call
+
+    def place(*args, **kwargs):
+        statuses.append(voice.deps.store.get_call("c1").status)
+        assert voice.deps.store.start_dialing("c1", T0) is False  # what a second delivery would try now
+        return original(*args, **kwargs)
+
+    voice.deps.telephony.place_call = place
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert statuses == ["dialing"] and len(voice.deps.telephony.placed) == 1
+    assert voice.deps.store.get_call("c1").placed_at == T0
+
+
+def test_what_was_said_before_the_reask_is_kept_when_the_call_ends_unclear(voice):
+    # "Halo? Ko je to?", asked again, then the receiver goes down: the family can still hear it.
+    from kuckuc.speech.interpret import Interpretation
+
+    class Heard:
+        def interpret(self, audio, lang, question):
+            return Interpretation(Answer.UNCLEAR, "Halo? Ko je to?")
+
+    voice.deps.interpreter = Heard()
+    voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    voice.twilio_post("/status/c1", {"CallStatus": "completed"})
+    call = voice.deps.store.get_call("c1")
+    assert (call.answer, call.transcript, call.recording_key) == (Answer.UNCLEAR, "Halo? Ko je to?", "recordings/c1-1.wav")

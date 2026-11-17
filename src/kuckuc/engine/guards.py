@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from zoneinfo import ZoneInfo
 
 from kuckuc.deps import Deps
 from kuckuc.models import Person, Target
@@ -18,7 +18,7 @@ def call_block_reason(deps: Deps, person: Person, target: Target, first_try: boo
     if deps.store.get_runtime().kill_switch:
         return "kill_switch"
     if target == Target.PERSON and first_try and not (person.demo or person.sim):
-        today = deps.clock.now().astimezone(UTC).date()
+        today = deps.clock.now().astimezone(ZoneInfo(person.tz)).date()  # the person's own day
         if deps.store.count_person_calls(person.id, today) >= deps.settings.max_person_calls_per_day:
             return "daily_cap"
     return None

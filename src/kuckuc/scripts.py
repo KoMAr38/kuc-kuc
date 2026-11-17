@@ -67,7 +67,7 @@ _PRONOUNS = {
 }
 
 
-def _number(value: float | None, lang: Lang) -> str:
+def _number(value: float | None) -> str:
     n = int(round(value or 0))
     if n < 0:
         return f"minus {abs(n)}"
@@ -84,7 +84,7 @@ def _render_sr(script: ScriptKind, p: ScriptParams) -> str:
     today = _TODAY["sr"].get(p.hazard) if p.hazard else None
     hello_person = f"Dobar dan, {p.name}. Ovde Kuc-kuc."
     hello_neighbor = f"Dobar dan, {p.neighbor}. Ovde Kuc-kuc."
-    can_you_go = f"Možete li da odete {pro['to']} sada? Recite da ili ne."
+    can_you_go = f"Recite da ili ne: možete li da odete {pro['to']} sada?"
 
     match script:
         case ScriptKind.INTRO_PERSON:
@@ -92,13 +92,13 @@ def _render_sr(script: ScriptKind, p: ScriptParams) -> str:
                 f"{hello_person} Ovu službu je za vas uključio {p.family}. "
                 "Zvaćemo vas samo kad stiže opasno vreme, da proverimo da li ste dobro. "
                 f"Vaš odgovor se kratko snima da {p.family} može da ga čuje. "
-                "Da li se slažete? Recite da ili ne."
+                "Recite da ili ne: da li se slažete?"
             )
         case ScriptKind.INTRO_NEIGHBOR:
             return (
                 f"{hello_neighbor} Kad stiže opasno vreme, zovemo telefonom da proverimo da li je {p.name} dobro. "
                 f"Ako se ne javi ili {pro['dative']} nije dobro, pozvali bismo vas da odete {pro['to']}. "
-                "Vaš odgovor se kratko snima. Da li se slažete? Recite da ili ne."
+                "Vaš odgovor se kratko snima. Recite da ili ne: da li se slažete?"
             )
         case ScriptKind.HEADSUP:
             return f"{hello_person} {_tomorrow('sr', p)} Jeste li dobro?"
@@ -112,7 +112,7 @@ def _render_sr(script: ScriptKind, p: ScriptParams) -> str:
         case ScriptKind.NEIGHBOR_ASK_UNWELL:
             return f"{hello_neighbor} {p.name} kaže da {pro['dative']} nije dobro. {can_you_go}"
         case ScriptKind.NEIGHBOR_FOLLOWUP:
-            return f"Dobar dan, {p.neighbor}. Jeste li proverili kako je {p.name}? Recite: dobro je, ili: treba pomoć."
+            return f"Dobar dan, {p.neighbor}. Recite: dobro je, ili: treba pomoć. Kako je {p.name}?"
     raise ValueError(f"no Serbian text for {script}")
 
 
@@ -121,7 +121,7 @@ def _render_en(script: ScriptKind, p: ScriptParams) -> str:
     today = _TODAY["en"].get(p.hazard) if p.hazard else None
     hello_person = f"Hello, {p.name}. This is Kuc-kuc."
     hello_neighbor = f"Hello, {p.neighbor}. This is Kuc-kuc."
-    can_you_go = f"Can you go and check on {pro['object']} now? Please say yes or no."
+    can_you_go = f"Please say yes or no: can you go and check on {pro['object']} now?"
 
     match script:
         case ScriptKind.INTRO_PERSON:
@@ -129,7 +129,7 @@ def _render_en(script: ScriptKind, p: ScriptParams) -> str:
                 f"{hello_person} {p.family} turned this service on for you. "
                 "We will call you only when dangerous weather is coming, to check that you are okay. "
                 f"Your answer is recorded briefly so that {p.family} can hear it. "
-                "Do you agree? Please say yes or no."
+                "Please say yes or no: do you agree?"
             )
         case ScriptKind.INTRO_NEIGHBOR:
             return (
@@ -137,7 +137,7 @@ def _render_en(script: ScriptKind, p: ScriptParams) -> str:
                 f"to check that {pro['subject']} is okay. "
                 f"If {pro['subject']} doesn't answer or is unwell, we would call you "
                 f"and ask you to go and check on {pro['object']}. "
-                "Your answer is recorded briefly. Do you agree? Please say yes or no."
+                "Your answer is recorded briefly. Please say yes or no: do you agree?"
             )
         case ScriptKind.HEADSUP:
             return f"{hello_person} {_tomorrow('en', p)} Are you okay?"
@@ -152,8 +152,8 @@ def _render_en(script: ScriptKind, p: ScriptParams) -> str:
             return f"{hello_neighbor} {p.name} says {pro['subject']} is not feeling well. {can_you_go}"
         case ScriptKind.NEIGHBOR_FOLLOWUP:
             return (
-                f"Hello, {p.neighbor}. Did you see {p.name}? "
-                f"Please say: {pro['subject']} is fine, or: {pro['subject']} needs help."
+                f"Hello, {p.neighbor}. Please say: {pro['subject']} is fine, or: {pro['subject']} needs help. "
+                f"How is {p.name}?"
             )
     raise ValueError(f"no English text for {script}")
 
@@ -161,17 +161,17 @@ def _render_en(script: ScriptKind, p: ScriptParams) -> str:
 def _tomorrow(lang: Lang, p: ScriptParams) -> str:
     if not p.hazard:
         return _TOMORROW_UNKNOWN[lang]
-    return _TOMORROW[lang][p.hazard].format(temp=_number(p.value, lang))
+    return _TOMORROW[lang][p.hazard].format(temp=_number(p.value))
 
 
 _REASK = {
     "sr": {
-        Question.WELLBEING: "Nisam vas razumela. Jeste li dobro? Recite da ili ne.",
+        Question.WELLBEING: "Nisam vas razumela. Recite da ili ne: jeste li dobro?",
         Question.YES_NO: "Nisam vas razumela. Recite da ili ne.",
         Question.NEIGHBOR_REPORT: "Nisam vas razumela. Recite: dobro je, ili: treba pomoć.",
     },
     "en": {
-        Question.WELLBEING: "Sorry, I didn't catch that. Are you okay? Please say yes or no.",
+        Question.WELLBEING: "Sorry, I didn't catch that. Please say yes or no: are you okay?",
         Question.YES_NO: "Sorry, I didn't catch that. Please say yes or no.",
         Question.NEIGHBOR_REPORT: "Sorry, I didn't catch that. Please say: fine, or: needs help.",
     },
@@ -193,6 +193,10 @@ _WELLBEING_SCRIPTS = frozenset(_SENDS_NEIGHBOR)
 
 def closing(script: ScriptKind, answer: Answer, lang: Lang, p: ScriptParams) -> str:
     """The last sentence of a call. "Take care" is said only after a clear "I am fine"."""
+    if script in (ScriptKind.INTRO_PERSON, ScriptKind.INTRO_NEIGHBOR) and answer in (Answer.YES, Answer.NO):
+        said = {"sr": {Answer.YES: "da", Answer.NO: "ne"}, "en": {Answer.YES: "yes", Answer.NO: "no"}}[lang][answer]
+        heard = "Razumela sam" if lang == "sr" else "I understood"
+        return f"{heard}: {said}. {neutral_closing(lang)}"
     if script in _WELLBEING_SCRIPTS and answer == Answer.OK:
         return (
             f"Hvala, {p.name}. Čuvajte se. Doviđenja." if lang == "sr" else f"Thank you, {p.name}. Take care. Goodbye."

@@ -97,9 +97,13 @@ def build_cloud_deps(settings: Settings, role: Literal["engine", "voice", "web",
         sid, token = settings.twilio_account_sid, settings.twilio_auth_token
         from kuckuc.web.demo_limits import CachedBalance
 
-        deps.telephony = TwilioTelephony(sid, token, settings.twilio_from_number, http=http)
-        # The demo checks the account balance on every start; ask the provider at most every 5 minutes.
-        deps.verify = CachedBalance(TwilioVerify(sid, token, settings.twilio_verify_sid, http=http), clock)
+        # Each gets only its own part: voice dials and never verifies; the public web service verifies
+        # numbers for the demo and never dials.
+        if role == "voice":
+            deps.telephony = TwilioTelephony(sid, token, settings.twilio_from_number, http=http)
+        else:
+            # The demo checks the account balance on every start; ask the provider at most every 5 minutes.
+            deps.verify = CachedBalance(TwilioVerify(sid, token, settings.twilio_verify_sid, http=http), clock)
     if role == "voice":
         from kuckuc.cloud import gemini_generate, google_tts_synth
         from kuckuc.speech.interpret import GeminiInterpreter
