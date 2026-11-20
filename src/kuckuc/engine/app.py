@@ -20,6 +20,7 @@ from fastapi import Body, FastAPI, Response
 from pydantic import ValidationError
 
 from kuckuc.deps import Deps
+from kuckuc.ports import StepInProgress
 from kuckuc.engine.guards import call_block_reason
 from kuckuc.engine.machine import (
     FOLLOWUP_DELAY_S,
@@ -56,10 +57,11 @@ SEEN_EVENTS_KEPT = 20
 # A step saved but not yet marked done may still be under way in another request (a slow message to
 # the family takes up to ~20 s). Only after this long is it carried out again by a later delivery.
 PENDING_GRACE_S = 90
-
-
-class StepInProgress(RuntimeError):
-    """The episode's last step may still be under way: the event is to come back later."""
+# Pub/Sub brings a failed event back for days. A demo visitor's (or simulated) step that has failed
+# this long is carried out without its calls: a phone must not ring hours after someone tried the
+# demo. A real check is closed by the watchdog after 45 minutes, and until then a late call to a
+# neighbour about a real person is still worth making.
+LATE_STEP_S = 30 * 60
 # Demo visitors and simulated people have no neighbour on file: they play the neighbour themselves.
 _SELF_NEIGHBORS = (EpisodeKind.DEMO, EpisodeKind.SIM)
 _AS_NEIGHBOR = {"sr": "vaš komšija", "en": "your neighbour"}
@@ -67,6 +69,12 @@ _AS_NEIGHBOR = {"sr": "vaš komšija", "en": "your neighbour"}
 
 def create_engine_app(deps: Deps) -> FastAPI:
     app = FastAPI(title="kuc-kuc engine", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.exception_handler(StepInProgress)
+    def come_back_later(request, exc: StepInProgress) -> Response:
+        # Not an error: the episode's last step may still be under way. The event comes back later.
+        log.warning("%s; asked to come back later", exc)
+        return Response(status_code=503)
 
     @app.post("/events")
     def events(envelope: dict = Body(...)) -> Response:
@@ -211,7 +219,7 @@ def _schedule_alert(deps: Deps, alert_id: str) -> None:
     repeated event, or a second hazard on the same day, schedules nothing new."""
     alert = deps.store.get_alert(alert_id)
     person = deps.store.get_person(alert.person_id) if alert else None
-    if alert is None or person is None or person.status != PersonStatus.ACTIVE or person.demo or person.sim:
+    if alert is None or person is None or person.status != PersonStatus.ACTIVE:
         return
     now = deps.clock.now()
     day_before = alert.day - timedelta(days=1)
@@ -281,6 +289,9 @@ def _advance(deps: Deps, episode_id: str, event_id: str | None, ev: Input) -> No
         return
     # Who may be called is fixed when the episode starts, so a neighbour who says yes in the middle
     # of an escalation never changes who is asked, or who is asked "how is she?".
+    if current.pending:
+        # The last step was saved but not carried out. It goes first, and nothing replaces it.
+        _finish_pending(deps, current)
     live = None if current.kind in _SELF_NEIGHBORS else [n.id for n in _active_neighbors(deps, current.person_id)]
     actions: list[Action] = []
 
@@ -288,6 +299,8 @@ def _advance(deps: Deps, episode_id: str, event_id: str | None, ev: Input) -> No
         actions.clear()  # the store may run this more than once
         if event_id and event_id in ep.seen_event_ids:
             return None
+        if ep.pending:
+            raise StepInProgress(f"episode {ep.id}: another delivery has just saved a step")
         if live is not None and ep.neighbor_ids is None:
             ep = ep.model_copy(update={"neighbor_ids": live})
         after, todo = step(ep, ev, _neighbor_count(ep))
@@ -307,24 +320,41 @@ def _advance(deps: Deps, episode_id: str, event_id: str | None, ev: Input) -> No
         )
 
     updated = deps.store.update_episode(episode_id, apply)
-    if updated is None:
-        current = deps.store.get_episode(episode_id)
-        if current is None or not current.pending:
-            return
-        if deps.clock.now() - current.updated_at < timedelta(seconds=PENDING_GRACE_S):
-            raise StepInProgress(f"episode {episode_id}: its last step may still be under way")
-        log.warning("episode %s: carrying out a step that was saved but not finished", episode_id)
-        updated, todo = current, [_load(a) for a in current.pending]
-    else:
-        todo = list(actions)
-    _execute(deps, updated, todo)
+    if updated is not None:
+        _execute(deps, updated, list(actions))
+        _step_done(deps, updated)
 
+
+def _finish_pending(deps: Deps, ep: Episode) -> None:
+    """Carries out a step that was saved but not finished, unless it may still be under way."""
+    age = deps.clock.now() - ep.updated_at
+    if age < timedelta(seconds=PENDING_GRACE_S):
+        raise StepInProgress(f"episode {ep.id}: its last step may still be under way")
+    actions = [_load(a) for a in ep.pending or []]
+    if ep.kind in _SELF_NEIGHBORS and age > timedelta(seconds=LATE_STEP_S) and any(
+        isinstance(a, PlaceCall) for a in actions
+    ):
+        log.warning("episode %s: a step saved %s ago is carried out without its calls, and closed", ep.id, age)
+        rest = [a for a in actions if not (isinstance(a, PlaceCall) or (isinstance(a, Notify) and a.key == "neighbor_called"))]
+        _execute(deps, ep, rest)
+        _step_done(deps, ep, closed=Result.NOT_DELIVERED)
+        return
+    log.warning("episode %s: carrying out a step that was saved but not finished", ep.id)
+    _execute(deps, ep, actions)
+    _step_done(deps, ep)
+
+
+def _step_done(deps: Deps, ep: Episode, closed: Result | None = None) -> None:
     def done(current: Episode) -> Episode | None:
-        if current.steps != updated.steps or current.pending is None:
-            return None
-        return current.model_copy(update={"pending": None})
+        if current.steps != ep.steps or current.pending is None:
+            return None  # a later step (or the watchdog) has moved on: leave it
+        update: dict = {"pending": None}
+        if closed is not None:
+            update |= {"state": EpisodeState.CLOSED, "result": closed, "updated_at": deps.clock.now()}
+        return current.model_copy(update=update)
 
-    deps.store.update_episode(episode_id, done)
+    if deps.store.update_episode(ep.id, done) is not None and closed is not None:
+        deps.store.add_timeline(ep.id, "episode_closed", {"result": closed.value})
 
 
 def _dump(action: Action) -> dict:
@@ -372,7 +402,13 @@ def _execute(deps: Deps, ep: Episode, actions: list[Action]) -> None:
     # Calls first: a slow message to the family must never hold up a call. A message that a
     # neighbour is being called goes only when that call really was queued.
     calls = [a for a in actions if isinstance(a, PlaceCall)]
-    all_queued = all([_place_call(deps, ep, person, action, n) for n, action in enumerate(calls)])
+    try:
+        all_queued = all([_place_call(deps, ep, person, action, n) for n, action in enumerate(calls)])
+    except Exception:
+        # The calls are tried again with the step when the event comes back, but the family must not
+        # wait for a queue to recover to hear that she is not well.
+        _tell_before_failing(deps, ep, person, [a for a in actions if isinstance(a, Notify) and a.urgent])
+        raise
     for action in actions:
         if isinstance(action, PlaceCall):
             continue
@@ -386,13 +422,33 @@ def _execute(deps: Deps, ep: Episode, actions: list[Action]) -> None:
             deps.store.add_timeline(ep.id, "episode_closed", {"result": action.result.value})
 
 
+def _tell_before_failing(deps: Deps, ep: Episode, person: Person, notices: list[Notify]) -> None:
+    """Sends the step's urgent messages ahead of its failed calls, and takes them out of the saved
+    step so that carrying it out again does not send them twice."""
+    if not notices:
+        return
+    try:
+        for action in notices:
+            _notify(deps, ep, person, action)
+        told = [_dump(a) for a in notices]
+
+        def without_told(current: Episode) -> Episode | None:
+            if current.steps != ep.steps or not current.pending:
+                return None
+            return current.model_copy(update={"pending": [a for a in current.pending if a not in told] or None})
+
+        deps.store.update_episode(ep.id, without_told)
+    except Exception:
+        log.exception("episode %s: the urgent message could not go ahead of the failed call", ep.id)
+
+
 def _place_call(deps: Deps, ep: Episode, person: Person, action: PlaceCall, n: int = 0) -> bool:
     """Queues the call; False when it was blocked. The call's id follows from the episode's step, so
     carrying out the same step again queues the same call once (the queue keeps one task per call)."""
     call_id = uuid.uuid5(uuid.NAMESPACE_URL, f"kuckuc:call:{ep.id}:{ep.steps}:{n}").hex
-    if deps.store.get_call(call_id) is not None:
-        deps.queue.enqueue_call(call_id, call_delay_s(deps, ep, action), sim=person.sim)
-        return True
+    existing = deps.store.get_call(call_id)
+    if existing is not None:
+        return _queue_again(deps, ep, person, action, existing)
     role = action.target.value
     words = ScriptParams(
         name=person.name, family=person.family_name, gender=person.gender, hazard=ep.hazard, value=ep.value
@@ -434,9 +490,19 @@ def _place_call(deps: Deps, ep: Episode, person: Person, action: PlaceCall, n: i
         local_day=deps.clock.now().astimezone(ZoneInfo(person.tz)).date().isoformat(),
     )
     delay_s = call_delay_s(deps, ep, action)
-    deps.store.put_call(call)
+    if not deps.store.create_call(call):
+        # Another run of this same step created it a moment ago: never overwrite what voice has done since.
+        return _queue_again(deps, ep, person, action, deps.store.get_call(call_id))
     deps.queue.enqueue_call(call.id, delay_s, sim=person.sim)
     deps.store.add_timeline(ep.id, "call_queued", {"role": role, "delay_s": str(delay_s)})
+    return True
+
+
+def _queue_again(deps: Deps, ep: Episode, person: Person, action: PlaceCall, call: CallRecord | None) -> bool:
+    """A call made by an earlier run of this step: queued again (the queue keeps one task per call)."""
+    if call is None or call.status == "blocked":
+        return False
+    deps.queue.enqueue_call(call.id, call_delay_s(deps, ep, action), sim=person.sim)
     return True
 
 

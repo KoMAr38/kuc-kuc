@@ -20,8 +20,8 @@ class DayWeather:
     """One local calendar day: the extremes that matter, and the day's snowfall."""
 
     day: date
-    apparent_max_c: float
-    temp_min_c: float
+    apparent_max_c: float | None  # None only when the service sent no temperature at all that day
+    temp_min_c: float | None
     gust_max_kmh: float
     snow_cm: float
 
@@ -39,22 +39,23 @@ def parse_forecast(payload: dict) -> list[DayWeather]:
     times = hourly.get("time") or []
     columns = [hourly.get(name) or [] for name in HOURLY]
 
-    by_day: dict[date, list[tuple[float, float, float, float]]] = {}
+    # Each value is taken from the hours that have it: one variable sent as null (Open-Meteo does
+    # that) must never hide the others. One temperature column missing is made up from the other
+    # (erring towards a call); a day with neither still counts its wind and snow.
+    by_day: dict[date, list[list[float | None]]] = {}
     for i, stamp in enumerate(times):
         row = [col[i] if i < len(col) else None for col in columns]
-        if any(value is None for value in row):
-            continue
-        by_day.setdefault(date.fromisoformat(stamp[:10]), []).append(tuple(row))
+        by_day.setdefault(date.fromisoformat(stamp[:10]), []).append(row)
 
     days = []
     for day in sorted(by_day):
-        temp, apparent, gusts, snow = zip(*by_day[day], strict=True)
+        temp, apparent, gusts, snow = ([v for v in values if v is not None] for values in zip(*by_day[day], strict=True))
         days.append(
             DayWeather(
                 day=day,
-                apparent_max_c=max(apparent),
-                temp_min_c=min(temp),
-                gust_max_kmh=max(gusts),
+                apparent_max_c=max(apparent or temp, default=None),
+                temp_min_c=min(temp or apparent, default=None),
+                gust_max_kmh=max(gusts, default=0.0),
                 snow_cm=round(sum(snow), 1),
             )
         )

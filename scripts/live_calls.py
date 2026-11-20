@@ -4,8 +4,8 @@
 
 A release swaps servers under a running call: on 17 November 2026 that made one answer reach two
 servers and turned it into "unclear". A call counts as live while it is being dialled or has been
-placed (ringing or talking) and dialling began less than 15 minutes ago; an older one only lost its
-last status report. Age counts from dialling, not from queueing: a follow-up is queued 20 minutes
+placed (ringing or talking) and dialling began less than 5 minutes ago (40 s of ringing and a
+60 s limit: no call lasts two); an older one only lost its last status report. Age counts from dialling, not from queueing: a follow-up is queued 20 minutes
 before it rings.
 Prints counts only, never a number or a name.
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime, timedelta
 
-LIVE_FOR = timedelta(minutes=15)
+LIVE_FOR = timedelta(minutes=5)
 LIVE_STATUSES = ("dialing", "placed")
 
 
@@ -33,12 +33,13 @@ def live_calls(rows: list[dict], now: datetime) -> int:
 
 
 def main() -> int:
-    from google.cloud import firestore
-    from google.cloud.firestore_v1.base_query import FieldFilter
-
-    from kuckuc.config import Settings
-
     try:
+        # Inside the try: a missing library is "could not look" (2), never "a call is live" (1).
+        from google.cloud import firestore
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        from kuckuc.config import Settings
+
         db = firestore.Client(project=Settings().project or None)
         query = db.collection("calls").where(filter=FieldFilter("status", "in", list(LIVE_STATUSES)))
         rows = [s.to_dict() for s in query.stream()]

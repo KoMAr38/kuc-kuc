@@ -146,3 +146,39 @@ def test_cold_fixture_gives_exactly_tomorrows_frost(settings):
 
 def test_mild_forecast_has_no_hazards(settings):
     assert hazards_for(parse_forecast(load("openmeteo_mild.json")), settings) == []
+
+
+
+def test_a_missing_gust_value_never_hides_a_frost(settings):
+    # Open-Meteo can send null for one variable; that day's frost must still be seen.
+    hours = [f"2026-11-21T{h:02d}:00" for h in range(24)]
+    payload = {
+        "hourly": {
+            "time": hours,
+            "temperature_2m": [-15.0] * 24,
+            "apparent_temperature": [-20.0] * 24,
+            "wind_gusts_10m": [None] * 24,
+            "snowfall": [0.0] * 23 + [None],
+        }
+    }
+    (day,) = parse_forecast(payload)
+    assert (day.temp_min_c, day.gust_max_kmh, day.snow_cm) == (-15.0, 0.0, 0.0)
+    assert [h.hazard for h in hazards_for([day], settings)] == ["cold"]
+
+
+def test_a_day_with_no_temperature_still_shows_its_storm(settings):
+    # Left out whole, such a day hid its wind and snow as well.
+    payload = {"hourly": {"time": ["2026-11-21T00:00"], "temperature_2m": [None], "apparent_temperature": [None],
+                          "wind_gusts_10m": [130.0], "snowfall": [0.0]}}  # fmt: skip
+    (day,) = parse_forecast(payload)
+    assert (day.temp_min_c, day.apparent_max_c, day.gust_max_kmh) == (None, None, 130.0)
+    assert [h.hazard for h in hazards_for([day], settings)] == ["wind"]
+
+
+def test_one_missing_temperature_column_is_made_up_from_the_other(settings):
+    hours = ["2026-11-21T12:00", "2026-11-22T12:00"]
+    payload = {"hourly": {"time": hours, "temperature_2m": [41.0, None], "apparent_temperature": [None, -30.0],
+                          "wind_gusts_10m": [0.0, 0.0], "snowfall": [0.0, 0.0]}}  # fmt: skip
+    heat_day, cold_day = parse_forecast(payload)
+    assert heat_day.apparent_max_c == 41.0 and cold_day.temp_min_c == -30.0
+    assert [h.hazard for h in hazards_for([heat_day, cold_day], settings)] == ["heat", "cold"]

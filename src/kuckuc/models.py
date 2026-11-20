@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Literal
 
@@ -198,3 +198,15 @@ class DemoSession(BaseModel):
 
 class Runtime(BaseModel):
     kill_switch: bool = False
+
+
+# An episode is saved as closed a moment before its last history rows (the message to the family,
+# "Done"); a page that stopped watching then never showed them. So a page watches until the closing
+# row is there, or, should that one write have failed for good, until two minutes after the close.
+CLOSING_ROWS_WAIT = timedelta(minutes=2)
+
+
+def finished_for_pages(episode: Episode, rows: list[TimelineEvent], now: datetime) -> bool:
+    if any(row.type == "episode_closed" for row in rows):
+        return True
+    return episode.state == EpisodeState.CLOSED and now - episode.updated_at > CLOSING_ROWS_WAIT

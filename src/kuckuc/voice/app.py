@@ -37,9 +37,21 @@ DEMO_RING_TIMEOUT_S = 25
 
 
 def create_voice_app(
-    deps: Deps, verify_oidc: Callable[[Request], bool], sleep: Callable[[float], None] = time.sleep
+    deps: Deps,
+    verify_oidc: Callable[[Request], bool],
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     app = FastAPI(title="kuc-kuc voice", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.exception_handler(Exception)
+    def never_an_error_page(request: Request, exc: Exception) -> Response:
+        # Whatever breaks, the person on the line never hears the provider's error message (in English):
+        # the call ends quietly, and the check goes on from what was stored (or the watchdog).
+        log.error("voice %s failed (%s)", request.url.path.split("/")[1], type(exc).__name__)
+        if request.url.path.startswith(("/twiml/", "/recording/")):
+            return _twiml("<Hangup/>")
+        return Response(status_code=500)
 
     def public(path: str) -> str:
         return f"{deps.settings.voice_public_url}{path}"
@@ -70,7 +82,7 @@ def create_voice_app(
         if not deps.store.complete_call(call.id, answer, transcript, recording_key):
             return False
         if timeline:
-            deps.store.add_timeline(call.episode_id, timeline[0], timeline[1])
+            note(call, *timeline)
         deps.bus.publish(
             "call.completed",
             {
@@ -84,13 +96,20 @@ def create_voice_app(
         log.info("call %s finished: %s", call.id, answer.value)
         return True
 
+    def note(call: CallRecord, kind: str, data: dict[str, str]) -> None:
+        """A row in the history. It must never stand between a call and what happens next."""
+        try:
+            deps.store.add_timeline(call.episode_id, kind, data)
+        except Exception as exc:
+            log.error("call %s: history row %s not written (%s)", call.id, kind, type(exc).__name__)
+
     def claim(call: CallRecord) -> bool:
         return deps.store.start_dialing(call.id, deps.clock.now())
 
     def block(call: CallRecord, reason: str) -> None:
         deps.store.patch_call(call.id, status="blocked")
         if reason != "refused":
-            deps.store.add_timeline(call.episode_id, "call_blocked", {"role": call.target.value, "reason": reason})
+            note(call, "call_blocked", {"role": call.target.value, "reason": reason})
         deps.bus.publish("call.blocked", {"call_id": call.id, "episode_id": call.episode_id, "reason": reason})
         log.warning("call %s blocked: %s", call.id, reason)
 
@@ -133,8 +152,7 @@ def create_voice_app(
             block(call, "kill_switch")
             return {"ok": True}
         if call.provider == "simulated":
-            if not claim(call):
-                return {"ok": True, "skipped": True}
+            # Never dialled, so never claimed: complete_call already lets one delivery finish it.
             prepared = call.params.get("sim_answer", "")
             finish(call, Answer(prepared) if prepared in set(Answer) else Answer.UNCLEAR, None, None)
             return {"ok": True}
@@ -174,7 +192,7 @@ def create_voice_app(
             log.error("call %s could not be placed (%s)", call.id, reason)
             if isinstance(exc, TelephonyError) and exc.refused:
                 # The phone never rang: say so, rather than "no answer", and do not try a refusal again.
-                deps.store.add_timeline(call.episode_id, "call_refused", {"role": call.target.value})
+                note(call, "call_refused", {"role": call.target.value})
                 block(call, "refused")
                 return {"ok": True}
             if isinstance(exc, TelephonyError) and exc.ours:
@@ -185,7 +203,7 @@ def create_voice_app(
             return {"ok": True}
         # Only a call still being dialled becomes "placed": a "busy" may have finished it already.
         if deps.store.mark_placed(call.id, sid):
-            deps.store.add_timeline(call.episode_id, "call_placed", {"role": call.target.value})
+            note(call, "call_placed", {"role": call.target.value})
             log.info("call %s placed", call.id)
         return {"ok": True}
 
@@ -203,7 +221,7 @@ def create_voice_app(
             # Our failure, not a hang-up: say so, and let the check go on as for any unclear answer.
             finish(call, Answer.UNCLEAR, None, None, ("call_failed", {"role": call.target.value}))
             return _twiml("<Hangup/>")
-        deps.store.add_timeline(call.episode_id, "call_answered", {"role": call.target.value})
+        note(call, "call_answered", {"role": call.target.value})
         log.info("call %s answered", call.id)
         return _twiml(_play(opening), *record_verbs(call.id, 1))
 
@@ -260,6 +278,18 @@ def create_voice_app(
 
     @app.post("/status/{call_id}")
     def on_status(call_id: str, params: dict = Depends(twilio_form)) -> dict:
+        try:
+            return _on_status(call_id, params)
+        finally:
+            if params.get("CallStatus") == "completed" and params.get("CallSid"):
+                # The line has closed: every recording of the call goes at the provider now, in a reply
+                # nobody hears. (A delete after an answer's reply could stall or be lost.)
+                try:
+                    deps.telephony.delete_call_recordings(params["CallSid"])
+                except Exception as exc:
+                    log.error("call %s: recordings not deleted at the provider (%s)", call_id, type(exc).__name__)
+
+    def _on_status(call_id: str, params: dict) -> dict:
         call = deps.store.get_call(call_id)
         status = params.get("CallStatus", "")
         if call is None or call.status == "completed":
@@ -268,10 +298,11 @@ def create_voice_app(
         if status in NOT_REACHED:
             finish(call, Answer.NO_ANSWER, None, None, ("call_missed", role))
         elif status == "completed":
-            waited = 0
-            while waited < HANGUP_GRACE_S:
-                sleep(1)
-                waited += 1
+            # By the clock, not by counting naps: each look at the database takes time too, and counted
+            # in naps the reply reached the provider after its own wait.
+            deadline = monotonic() + HANGUP_GRACE_S
+            while (left := deadline - monotonic()) > 0:
+                sleep(min(1.0, left))
                 current = deps.store.get_call(call_id)
                 if current is not None and current.status == "completed":
                     return {"ok": True}

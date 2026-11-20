@@ -23,6 +23,7 @@ class FakeTelephony:
         self.placed: list[PlacedCall] = []
         self.fetched: list[str] = []
         self.deleted: list[str] = []
+        self.swept: list[str] = []
         # Statuses the local system reports for the next placed calls ("no-answer", "busy", ...).
         self.script_status: list[str] = []
 
@@ -39,6 +40,9 @@ class FakeTelephony:
 
     def delete_recording(self, recording_url: str) -> None:
         self.deleted.append(recording_url)
+
+    def delete_call_recordings(self, call_sid: str) -> None:
+        self.swept.append(call_sid)
 
     def valid_signature(self, url: str, params: dict[str, str], signature: str) -> bool:
         return self.valid

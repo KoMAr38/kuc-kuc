@@ -177,3 +177,69 @@ def test_a_rate_limit_is_neither_a_refused_number_nor_our_own_fault():
 
     error = TelephonyError("x", status=429, code="20429")
     assert error.refused is False and error.ours is False
+
+
+
+def test_all_recordings_of_a_call_are_deleted_and_a_failure_is_logged(caplog):
+    from kuckuc.telephony.twilio_provider import TwilioTelephony
+
+    http = FakeHttp([(200, {"recordings": [{"sid": "RE1"}, {"sid": "RE2"}]}), 204, 500])
+    TwilioTelephony("AC1", "token", "+15005550006", http=http).delete_call_recordings("CA" + "a" * 32)
+    assert [m for m, *_ in http.calls] == ["GET", "DELETE", "DELETE"]
+    assert http.requested[1].endswith("/Recordings/RE1.json") and "RE2" in caplog.text and "500" in caplog.text
+
+
+def test_a_call_id_that_is_not_twilios_never_reaches_the_api():
+    from kuckuc.telephony.twilio_provider import TwilioTelephony
+
+    http = FakeHttp([])
+    TwilioTelephony("AC1", "token", "+15005550006", http=http).delete_call_recordings("../Accounts")
+    assert http.calls == []
+
+
+
+def test_a_signature_made_for_the_address_with_its_default_port_is_also_accepted():
+    # Twilio signs the address as it was configured; with or without :443 both must pass, as in its SDK.
+    import twilio.request_validator
+
+    from kuckuc.telephony.twilio_provider import TwilioTelephony
+
+    t = TwilioTelephony("AC1", "secret", "+15005550006", http=FakeHttp([]))
+    params = {"CallSid": "CA1", "CallStatus": "completed", "Digits": "1"}
+    with_port = twilio.request_validator.RequestValidator("secret").compute_signature("https://voice.example:443/status/c1", params)
+    assert t.valid_signature("https://voice.example/status/c1", params, with_port) is True
+
+
+def test_the_service_does_not_need_the_twilio_package_to_check_signatures():
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "src" / "kuckuc" / "telephony" / "twilio_provider.py"
+    imports = [n for n in ast.walk(ast.parse(source.read_text(encoding="utf-8"))) if isinstance(n, ast.ImportFrom)]
+    assert not any((n.module or "").startswith("twilio") for n in imports)
+
+
+
+def test_a_signature_with_a_strange_character_is_refused_not_an_error():
+    t = telephony()
+    assert t.valid_signature("https://voice.example/status/c1", {"CallSid": "CA1"}, "é" * 28) is False
+
+
+def test_the_address_is_checked_exactly_as_twilio_signed_it():
+    import twilio.request_validator
+
+    t = telephony()
+    params = {"CallSid": "CA1", "CallStatus": "completed"}
+    for url in ("https://Voice.Example/status/c1", "https://Voice.Example:443/status/c1?n=1"):
+        signature = twilio.request_validator.RequestValidator("secret").compute_signature(url, params)
+        assert t.valid_signature(url, params, signature) is True, url
+
+
+def test_the_fields_are_signed_in_name_order_whatever_order_they_arrive_in():
+    import twilio.request_validator
+
+    t = telephony()
+    url = "https://voice.example/status/c1"
+    arrived = {"Digits": "1", "CallStatus": "completed", "AccountSid": "AC1", "CallSid": "CA1"}
+    signature = twilio.request_validator.RequestValidator("secret").compute_signature(url, arrived)
+    assert t.valid_signature(url, arrived, signature) is True

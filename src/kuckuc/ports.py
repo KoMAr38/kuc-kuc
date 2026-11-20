@@ -9,6 +9,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
 
+class StepInProgress(RuntimeError):
+    """The episode's last step may still be under way: the event is to come back later."""
+
+
 class EventBus(Protocol):
     def publish(self, type: str, data: dict) -> str:
         """Publish an event and return its id."""
@@ -59,28 +63,45 @@ Subscriber = Callable[[str, str, dict], None]  # (event_id, type, data)
 
 class MemoryBus:
     """Delivers to subscribers in publish order. An event published while another is being
-    handled waits its turn, as it would on a real bus, instead of running inside the handler."""
+    handled waits its turn, as it would on a real bus, instead of running inside the handler.
+    One the engine asks to come back later is kept, and delivered again by ``redeliver``, as
+    Pub/Sub brings it back a few seconds later."""
 
     def __init__(self) -> None:
         self.published: list[tuple[str, dict]] = []
         self.subscribers: list[Subscriber] = []
-        self._pending: deque[tuple[str, str, dict]] = deque()
+        self.later: list[tuple[str, str, dict, Subscriber]] = []
+        self._pending: deque[tuple[str, str, dict, Subscriber | None]] = deque()
         self._draining = False
 
     def publish(self, type: str, data: dict) -> str:
         event_id = f"evt-{len(self.published) + 1}"
         self.published.append((type, data))
-        self._pending.append((event_id, type, data))
-        if not self._draining:
-            self._draining = True
-            try:
-                while self._pending:
-                    eid, etype, edata = self._pending.popleft()
-                    for deliver in list(self.subscribers):
-                        deliver(eid, etype, edata)
-            finally:
-                self._draining = False
+        self._pending.append((event_id, type, data, None))
+        self._drain()
         return event_id
+
+    def redeliver(self) -> int:
+        """Delivers again every event that was asked to come back later. Returns how many."""
+        due, self.later = self.later, []
+        self._pending.extend(due)
+        self._drain()
+        return len(due)
+
+    def _drain(self) -> None:
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            while self._pending:
+                eid, etype, edata, only = self._pending.popleft()
+                for deliver in [only] if only else list(self.subscribers):
+                    try:
+                        deliver(eid, etype, edata)
+                    except StepInProgress:
+                        self.later.append((eid, etype, edata, deliver))
+        finally:
+            self._draining = False
 
 
 @dataclass

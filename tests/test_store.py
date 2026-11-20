@@ -25,7 +25,7 @@ def test_alert_is_created_once_and_can_be_read_back(store):
 
 
 def test_complete_call_only_first_time(store):
-    store.put_call(make_call(id="c1"))
+    store.create_call(make_call(id="c1"))
     assert store.complete_call("c1", Answer.OK, "dobro sam", None) is True
     assert store.complete_call("c1", Answer.NEEDS_HELP, None, None) is False
     assert store.get_call("c1").answer == Answer.OK
@@ -40,18 +40,18 @@ def test_timeline_after_seq(store):
 
 def test_count_person_calls_ignores_neighbour_calls(store):
     store.create_episode(make_episode(id="e1", person_id="p1"))
-    store.put_call(make_call(id="c1", target=Target.PERSON, episode_id="e1"))
-    store.put_call(make_call(id="c2", target=Target.NEIGHBOR, episode_id="e1"))
+    store.create_call(make_call(id="c1", target=Target.PERSON, episode_id="e1"))
+    store.create_call(make_call(id="c2", target=Target.NEIGHBOR, episode_id="e1"))
     assert store.count_person_calls("p1", TODAY) == 1
 
 
 def test_count_person_calls_ignores_other_people_other_days_and_blocked_calls(store):
     store.create_episode(make_episode(id="e1", person_id="p1"))
     store.create_episode(make_episode(id="e2", person_id="p2"))
-    store.put_call(make_call(id="c1", episode_id="e1"))
-    store.put_call(make_call(id="c2", episode_id="e2"))
-    store.put_call(make_call(id="c3", episode_id="e1", created_at=T0 - timedelta(days=1)))
-    store.put_call(make_call(id="c4", episode_id="e1", status="blocked"))
+    store.create_call(make_call(id="c1", episode_id="e1"))
+    store.create_call(make_call(id="c2", episode_id="e2"))
+    store.create_call(make_call(id="c3", episode_id="e1", created_at=T0 - timedelta(days=1)))
+    store.create_call(make_call(id="c4", episode_id="e1", status="blocked"))
     assert store.count_person_calls("p1", TODAY) == 1
 
 
@@ -84,14 +84,23 @@ def test_list_active_persons_is_only_real_people_under_watch(store):
     assert [p.id for p in store.list_active_persons()] == ["p1"]
 
 
-def test_stats_count_real_calls_and_real_people():
-    s = MemoryStore(now=lambda: T0)
+def test_stats_count_calls_on_the_day_they_rang_as_the_real_store_does():
+    clock = {"t": T0 - timedelta(days=3)}
+    s = MemoryStore(now=lambda: clock["t"])
     s.put_person(make_person(id="p1"))
     s.put_person(make_person(id="p4", demo=True))
-    s.put_call(make_call(id="c1", status="completed"))
-    s.put_call(make_call(id="c2", status="placed", created_at=T0 - timedelta(days=3)))
-    s.put_call(make_call(id="c3", status="blocked"))
-    s.put_call(make_call(id="c4", status="completed", provider="simulated"))
+
+    def ring(id, **over):
+        s.create_call(make_call(id=id, **over))
+        s.start_dialing(id, clock["t"])
+        assert s.mark_placed(id, "CA" + id)
+
+    ring("three-days-ago")
+    clock["t"] = T0
+    ring("queued-yesterday", created_at=T0 - timedelta(days=1))  # queued before midnight, rang today
+    s.create_call(make_call(id="never-rang"))
+    s.complete_call("never-rang", Answer.NO_ANSWER, None, None)  # the network failed before it rang
+    s.create_call(make_call(id="sim", provider="simulated", status="completed"))
     assert s.stats() == {"calls_today": 1, "calls_total": 2, "persons_active": 1}
 
 
@@ -164,9 +173,9 @@ def test_invite_codes_are_read_from_a_plain_list(monkeypatch):
 
 def test_calls_of_an_episode_come_back_oldest_first(store):
     store.create_episode(make_episode(id="e1"))
-    store.put_call(make_call(id="late", episode_id="e1", created_at=T0 + timedelta(minutes=10)))
-    store.put_call(make_call(id="early", episode_id="e1", created_at=T0))
-    store.put_call(make_call(id="other", episode_id="e2"))
+    store.create_call(make_call(id="late", episode_id="e1", created_at=T0 + timedelta(minutes=10)))
+    store.create_call(make_call(id="early", episode_id="e1", created_at=T0))
+    store.create_call(make_call(id="other", episode_id="e2"))
     assert [c.id for c in store.list_calls_for_episode("e1")] == ["early", "late"]
     assert store.list_calls_for_episode("none") == []
 
@@ -194,7 +203,7 @@ def test_each_recording_of_a_call_is_claimed_once(store):
 
 
 def test_a_call_can_be_claimed_for_dialling_once(store):
-    store.put_call(make_call(id="c1"))
+    store.create_call(make_call(id="c1"))
     assert store.start_dialing("c1", T0) is True
     assert store.start_dialing("c1", T0) is False
     assert (store.get_call("c1").status, store.get_call("c1").placed_at) == ("dialing", T0)
@@ -214,7 +223,7 @@ def test_a_demo_reservation_counts_every_quota_and_the_money_all_or_nothing(stor
 
 
 def test_a_call_is_marked_placed_only_from_dialling(store):
-    store.put_call(make_call(id="c1"))
+    store.create_call(make_call(id="c1"))
     assert store.mark_placed("c1", "CA1") is False  # still queued
     store.start_dialing("c1", T0)
     assert store.mark_placed("c1", "CA1") is True
@@ -230,7 +239,7 @@ def test_a_call_counts_on_the_day_where_the_person_lives(store):
 
     store.create_episode(make_episode(id="e1", person_id="p1"))
     late = datetime(2026, 11, 20, 23, 30, tzinfo=UTC)
-    store.put_call(make_call(id="c1", episode_id="e1", created_at=late, local_day="2026-11-21"))
+    store.create_call(make_call(id="c1", episode_id="e1", created_at=late, local_day="2026-11-21"))
     assert store.count_person_calls("p1", date(2026, 11, 21)) == 1
     assert store.count_person_calls("p1", date(2026, 11, 20)) == 0
 
@@ -250,7 +259,14 @@ def test_parallel_reservations_never_pass_a_limit(store):
 def test_parallel_claims_dial_a_call_once(store):
     from concurrent.futures import ThreadPoolExecutor
 
-    store.put_call(make_call(id="c1"))
+    store.create_call(make_call(id="c1"))
     with ThreadPoolExecutor(6) as pool:
         results = list(pool.map(lambda _: store.start_dialing("c1", T0), range(6)))
     assert results.count(True) == 1
+
+
+
+def test_a_call_is_created_once(store):
+    assert store.create_call(make_call(id="c1")) is True
+    assert store.create_call(make_call(id="c1", to="+15005550009")) is False
+    assert store.get_call("c1").to != "+15005550009"

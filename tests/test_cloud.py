@@ -96,7 +96,9 @@ def test_cloud_tasks_payload_for_delayed_call():
     assert task.body == {"call_id": "c1"} and task.audience == "https://voice"
     q.enqueue_call("c2", delay_s=0, sim=True)
     assert q.client.created[1].parent.endswith("/queues/calls-sim")
-    assert q.client.created[1].schedule_time is None
+    # A simulated call answers at once: a second's wait lets the step that queued it finish first,
+    # instead of its result being sent back by the engine and retried by Pub/Sub ten seconds later.
+    assert q.client.created[1].schedule_time == T0 + timedelta(seconds=1)
 
 
 def test_cloud_tasks_payload_for_a_timer():
@@ -187,3 +189,18 @@ def test_each_service_gets_only_the_twilio_part_it_uses(monkeypatch):
     voice = build_cloud_deps(settings, "voice")
     assert isinstance(voice.telephony, TwilioTelephony) and voice.verify is None
     assert web.queue is None and voice.queue is None  # only the engine queues calls and timers
+    from kuckuc.engine.notify import TelegramNotifier
+
+    engine = build_cloud_deps(settings.model_copy(update={"telegram_bot_token": "T"}), "engine")
+    assert engine.queue is not None and isinstance(engine.notifier, TelegramNotifier)
+
+
+def test_the_watchdog_runs_with_the_engines_queue_and_messages(monkeypatch):
+    import kuckuc.deps
+    import kuckuc.jobs.watchdog as watchdog
+
+    roles = []
+    monkeypatch.setattr(kuckuc.deps, "build_cloud_deps", lambda settings, role: roles.append(role) or object())
+    monkeypatch.setattr(watchdog, "run_watchdog", lambda deps: [])
+    watchdog.main()
+    assert roles == ["engine"]

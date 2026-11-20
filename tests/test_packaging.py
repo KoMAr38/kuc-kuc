@@ -55,7 +55,12 @@ def test_the_release_guard_waits_as_long_as_a_call_counts_as_live_and_stops_on_a
     guard = script[script.index("guard_live_calls() {") : script.index("\n}\n", script.index("guard_live_calls() {"))]
     tries = int(re.search(r"seq 1 (\d+)", guard).group(1))
     wait = int(re.search(r"sleep (\d+)", guard).group(1))
-    assert tries * wait >= 15 * 60  # scripts/live_calls.py LIVE_FOR
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("live_calls", ROOT / "scripts" / "live_calls.py")
+    live_calls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(live_calls)
+    assert tries * wait >= live_calls.LIVE_FOR.total_seconds()
     assert "-ne 1 ]" in guard  # anything but "a call is live" stops the release at once
 
 
@@ -69,3 +74,12 @@ def test_the_server_never_uses_the_one_library_the_pins_cannot_cover():
     # uvloop is installed only on Linux, so a pip freeze on Windows cannot pin it; the asyncio loop needs no pin.
     script = (ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
     assert "--loop,asyncio" in script
+
+
+
+def test_a_release_with_changes_not_committed_to_git_is_refused_or_named_so():
+    # The version's name is the commit's: changes not committed would run under a name that hides them.
+    script = (ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    check = script.index("git diff --quiet HEAD")
+    assert script.index('TAG="$(git rev-parse') < check < script.index("gcloud builds submit")
+    assert "ALLOW_DIRTY" in script and "-dirty-" in script

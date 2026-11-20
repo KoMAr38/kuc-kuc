@@ -44,6 +44,7 @@ class LocalSystem:
         self.clock.advance(advance_s)
         ran = 0
         while True:
+            self.deps.bus.redeliver()  # what the engine asked to come back later, as Pub/Sub would
             now = self.clock.now()
             due = [t for t in self.deps.queue.tasks if t.at <= now]
             if not due:
@@ -108,6 +109,19 @@ class LocalSystem:
         return self._voice_client.post(path, data=data or {}, headers=_SIGNED)
 
 
+class _Stopwatch:
+    """The voice service's waits pass at once here: a nap moves this stopwatch, not the wall clock."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+    def monotonic(self) -> float:
+        return self.t
+
+
 def _local_sign_in(credential: str, client_id: str) -> dict:
     """Local preview and tests have no Google: whatever is typed as the credential is the email."""
     return {"sub": f"local-{credential}", "email": credential, "email_verified": True}
@@ -143,10 +157,13 @@ def build_local(now: datetime | None = None) -> LocalSystem:
     deps.interpreter = FakeInterpreter()
     deps.verify = FakeVerify()
     deps.bus.subscribers.append(lambda event_id, type, data: handle_event(deps, event_id, type, data))
+    stopwatch = _Stopwatch()
     return LocalSystem(
         deps=deps,
         engine=create_engine_app(deps),
-        voice=create_voice_app(deps, verify_oidc=lambda request: True, sleep=lambda seconds: None),
+        voice=create_voice_app(
+            deps, verify_oidc=lambda request: True, sleep=stopwatch.sleep, monotonic=stopwatch.monotonic
+        ),
         web=create_web_app(deps, verify_credential=_local_sign_in, http_get=_local_http_get),
         clock=deps.clock,
     )

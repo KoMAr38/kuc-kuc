@@ -7,7 +7,7 @@ from factories import make_episode, make_neighbor, make_person
 from fastapi.testclient import TestClient
 from helpers import build_sys, complete, only_call, only_new_call, real_calls, request_check, seed_person_calls
 
-from kuckuc.engine.app import handle_event
+from kuckuc.engine.app import StepInProgress, handle_event
 from kuckuc.engine.guards import call_block_reason
 from kuckuc.engine.notify import render_message
 from kuckuc.models import (
@@ -631,3 +631,220 @@ def test_a_night_introduction_whose_timer_failed_gets_it_when_the_request_comes_
         handle_event(sys.deps, "m-1", "intro.requested", {"neighbor_id": "n1"})
     handle_event(sys.deps, "m-1", "intro.requested", {"neighbor_id": "n1"})
     assert [t.kind for t in sys.deps.queue.tasks] == ["due"]
+
+
+
+# --- audit 17 Nov, third round --------------------------------------------------------------
+
+
+def test_a_new_event_waits_for_an_unfinished_step_and_never_wipes_it(sys):
+    # The family's urgent "she is not well" was still unsent when the neighbour's answer arrived.
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    send, failed = sys.deps.notifier.send, []
+
+    def fails_once(*args):
+        if not failed:
+            failed.append(args)
+            raise RuntimeError("database hiccup while telling the family")
+        return send(*args)
+
+    sys.deps.notifier.send = fails_once
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    ask = only_new_call(sys)
+    sys.deps.store.complete_call(ask.id, Answer.YES, None, None)
+    with pytest.raises(StepInProgress):
+        handle_event(sys.deps, "m-2", "call.completed", completion(ask, Answer.YES))
+    sys.clock.advance(120)
+    handle_event(sys.deps, "m-2", "call.completed", completion(ask, Answer.YES))
+    assert "call_unwell" in sent_keys(sys) and "neighbor_going" in sent_keys(sys)
+
+
+def test_a_step_carried_out_again_never_resets_a_call_voice_has_moved_on(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    original, failed = sys.deps.queue.enqueue_call, []
+
+    def fail_once(call_id, delay_s, sim=False):
+        if not failed:
+            failed.append(call_id)
+            raise RuntimeError("deadline exceeded")
+        return original(call_id, delay_s, sim)
+
+    sys.deps.queue.enqueue_call = fail_once
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    (ask,) = [c for c in real_calls(sys) if c.target == Target.NEIGHBOR]
+    sys.deps.store.patch_call(ask.id, status="placed")  # voice dialled it meanwhile
+    sys.clock.advance(120)
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    assert sys.deps.store.get_call(ask.id).status == "placed"
+    assert sys.deps.store.create_call(sys.deps.store.get_call(ask.id)) is False  # a call is created once
+
+
+def test_come_back_later_is_a_quiet_503_not_a_server_error(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    sys.deps.queue.enqueue_call = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("down"))
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    reply = TestClient(sys.engine).post("/events", json=envelope("call.completed", completion(call, Answer.NEEDS_HELP), "m-9"))
+    assert reply.status_code == 503
+
+
+def test_every_action_survives_being_saved_and_read_back():
+    from kuckuc.engine.app import _dump, _load
+    from kuckuc.engine.machine import Close, Notify, PlaceCall, SetStatus
+
+    actions = [
+        PlaceCall(Target.NEIGHBOR, 1, ScriptKind.NEIGHBOR_FOLLOWUP, 1200),
+        Notify("needs_help_194", urgent=True),
+        Notify("call_ok"),
+        SetStatus(Target.PERSON, PersonStatus.ACTIVE),
+        Close(Result.NEEDS_HELP),
+    ]
+    assert [_load(_dump(a)) for a in actions] == actions
+
+
+
+# --- audit 20 Nov, fourth round -------------------------------------------------------------
+
+
+def test_she_is_unwell_reaches_the_family_even_while_the_neighbours_call_cannot_be_queued(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    original = sys.deps.queue.enqueue_call
+    sys.deps.queue.enqueue_call = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Cloud Tasks down"))
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    assert sent_keys(sys).count("call_unwell") == 1  # told at once, not when the queue comes back
+    assert "neighbor_called" not in sent_keys(sys)
+    sys.deps.queue.enqueue_call = original
+    sys.clock.advance(120)
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))  # Pub/Sub again
+    assert sent_keys(sys).count("call_unwell") == 1  # and only once
+    assert sent_keys(sys).count("neighbor_called") == 1
+
+
+def test_a_planned_check_that_meets_stopped_calls_tells_the_family_as_it_would_in_the_cloud(sys):
+    # The blocked call's event arrives while the timer's own step is still under way. Pub/Sub brings it
+    # back a little later; the local bus must too, or no test can see this path.
+    from datetime import timedelta
+
+    from factories import T0
+
+    due = T0 + timedelta(hours=1)
+    sys.deps.store.create_episode(make_episode(id="p1:planned", state=EpisodeState.SCHEDULED, due_at=due))
+    sys.deps.queue.enqueue_due("p1:planned", due)
+    sys.deps.store.runtime.kill_switch = True
+    sys.run_tasks(3600)
+    assert "call_blocked" in sent_keys(sys)
+    assert sys.deps.store.get_episode("p1:planned").state == EpisodeState.CLOSED
+
+
+def test_a_demo_step_that_kept_failing_for_hours_never_rings_the_visitor_late(sys):
+    sys.deps.store.put_person(make_person(id="demo-1", name="there", lang="en", phone="+15005550009", demo=True, owner_uid=""))
+    sys.deps.bus.publish("check.requested", {"person_id": "demo-1", "kind": "demo", "hazard": "heat", "episode_id": "demo-d1"})
+    (first,) = [c for c in real_calls(sys) if c.episode_id == "demo-d1"]
+    sys.deps.store.complete_call(first.id, Answer.NEEDS_HELP, None, None)
+    original = sys.deps.queue.enqueue_call
+    sys.deps.queue.enqueue_call = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Cloud Tasks down"))
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(first, Answer.NEEDS_HELP))
+    sys.deps.queue.enqueue_call = original
+    sys.deps.queue.tasks.clear()
+    sys.clock.advance(3 * 3600)  # Pub/Sub kept bringing the event back; hours later the queue works again
+    handle_event(sys.deps, "m-1", "call.completed", completion(first, Answer.NEEDS_HELP))
+    assert [t for t in sys.deps.queue.tasks if t.kind == "call"] == []
+    ep = sys.deps.store.get_episode("demo-d1")
+    assert (ep.state, ep.result) == (EpisodeState.CLOSED, Result.NOT_DELIVERED)
+    assert "episode_closed" in [e.type for e in sys.deps.store.list_timeline("demo-d1")]
+
+
+def test_a_real_check_step_that_failed_for_a_while_still_calls_the_neighbour(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    original = sys.deps.queue.enqueue_call
+    sys.deps.queue.enqueue_call = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Cloud Tasks down"))
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    sys.deps.queue.enqueue_call = original
+    sys.deps.queue.tasks.clear()  # her own call ran long ago
+    sys.clock.advance(35 * 60)
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    assert [t.kind for t in sys.deps.queue.tasks] == ["call"]  # a late call about a real person is still made
+
+
+
+def test_an_event_that_races_a_step_saved_meanwhile_comes_back_later_and_leaves_that_step(sys):
+    ep_id = request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.OK, None, None)
+    saved = [{"type": "Notify", "key": "call_unwell", "urgent": True}]
+    sys.deps.store.update_episode(ep_id, lambda e: e.model_copy(update={"pending": saved}))
+    read = sys.deps.store.get_episode
+    # This delivery read the episode a moment before another one saved its step.
+    sys.deps.store.get_episode = lambda id: read(id).model_copy(update={"pending": None})
+    with pytest.raises(StepInProgress):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.OK))
+    sys.deps.store.get_episode = read
+    assert sys.deps.store.get_episode(ep_id).pending == saved
+
+
+def test_a_step_carried_out_again_never_queues_a_call_that_was_stopped_meanwhile(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    send, failed = sys.deps.notifier.send, []
+
+    def fails_once(*args):
+        if not failed:
+            failed.append(args)
+            raise RuntimeError("Telegram hiccup")
+        return send(*args)
+
+    sys.deps.notifier.send = fails_once
+    with pytest.raises(RuntimeError):
+        handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    (ask,) = neighbour_calls(sys)
+    sys.deps.store.patch_call(ask.id, status="blocked")  # voice ran its task and stopped it (calls switched off)
+    sys.deps.queue.tasks.clear()
+    sys.clock.advance(120)
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    assert [t for t in sys.deps.queue.tasks if t.kind == "call"] == []
+    assert "neighbor_called" not in sent_keys(sys) and "call_unwell" in sent_keys(sys)
+
+
+def test_a_finished_step_never_clears_the_step_saved_after_it(sys):
+    from kuckuc.engine.app import _step_done
+
+    ep_id = request_check(sys)
+    finished = sys.deps.store.get_episode(ep_id)
+    newer = [{"type": "Notify", "key": "call_unwell", "urgent": True}]
+    sys.deps.store.update_episode(ep_id, lambda e: e.model_copy(update={"steps": e.steps + 1, "pending": newer}))
+    _step_done(sys.deps, finished)
+    assert sys.deps.store.get_episode(ep_id).pending == newer
+
+
+def test_a_call_another_run_created_a_moment_ago_is_neither_created_nor_queued_again(sys):
+    request_check(sys)
+    call = only_new_call(sys)
+    sys.deps.store.complete_call(call.id, Answer.NEEDS_HELP, None, None)
+    create = sys.deps.store.create_call
+
+    def created_meanwhile(c):
+        create(c)  # the other run, a moment earlier; voice has stopped it since
+        sys.deps.store.patch_call(c.id, status="blocked")
+        return create(c)
+
+    sys.deps.store.create_call = created_meanwhile
+    sys.deps.queue.tasks.clear()
+    handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
+    assert [t for t in sys.deps.queue.tasks if t.kind == "call"] == []
+    assert "neighbor_called" not in sent_keys(sys)

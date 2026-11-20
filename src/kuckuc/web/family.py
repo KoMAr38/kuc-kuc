@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import importlib.resources
 import logging
+import re
 import secrets
 import uuid
 from collections.abc import Callable
@@ -26,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kuckuc.deps import Deps
 from kuckuc.engine.schedule import daytime_start
 from kuckuc.engine.notify import LINKED, NOT_LINKED
-from kuckuc.models import EpisodeKind, EpisodeState, Neighbor, Person, PersonStatus, User
+from kuckuc.models import EpisodeKind, EpisodeState, Neighbor, Person, PersonStatus, User, finished_for_pages
 from kuckuc.rules import hazards_for
 from kuckuc.weather import cell_of, fetch_forecast
 
@@ -227,7 +228,7 @@ def family_router(
     def me(user: User = Depends(current_user)):
         bot = deps.settings.telegram_bot_name
         link = f"https://t.me/{bot}?start={user.telegram_link_code}" if bot and user.telegram_link_code else None
-        persons = [p for p in deps.store.list_persons_by_owner(user.uid) if not (p.demo or p.sim)]
+        persons = deps.store.list_persons_by_owner(user.uid)  # demo and simulated people have no owner
         return {
             "email": user.email,
             "lang": user.lang,
@@ -241,6 +242,7 @@ def family_router(
         person = owned_person(person_id, user)
         out = []
         for episode in deps.store.list_episodes(person.id, limit=20):
+            rows = deps.store.list_timeline(episode.id)
             out.append(
                 {
                     "id": episode.id,
@@ -249,10 +251,10 @@ def family_router(
                     "result": episode.result.value if episode.result else None,
                     "hazard": episode.hazard,
                     "created_at": episode.created_at.isoformat(),
-                    "events": [
-                        {"seq": e.seq, "at": e.at.isoformat(), "type": e.type, "public": e.public}
-                        for e in deps.store.list_timeline(episode.id)
-                    ],
+                    # The page keeps watching while this is true; planned checks are not watched.
+                    "running": episode.state != EpisodeState.SCHEDULED
+                    and not finished_for_pages(episode, rows, deps.clock.now()),
+                    "events": [{"seq": e.seq, "at": e.at.isoformat(), "type": e.type, "public": e.public} for e in rows],
                     "calls": [
                         {
                             "id": c.id,
@@ -268,7 +270,7 @@ def family_router(
         return out
 
     @router.get("/api/family/recordings/{call_id}")
-    def recording(call_id: str, user: User = Depends(current_user)):
+    def recording(call_id: str, request: Request, user: User = Depends(current_user)):
         call = deps.store.get_call(call_id)
         episode = deps.store.get_episode(call.episode_id) if call else None
         if call is None or episode is None or not call.recording_key:
@@ -277,7 +279,18 @@ def family_router(
         audio = deps.blobs.get(call.recording_key)
         if audio is None:  # recordings are deleted after 7 days
             raise HTTPException(status_code=404)
-        return Response(content=audio, media_type="audio/wav")
+        # Safari on an iPhone plays audio only from a server that answers a request for part of it.
+        wanted = re.fullmatch(r"bytes=(\d+)-(\d*)", request.headers.get("range", ""))
+        if wanted and int(wanted.group(1)) < len(audio):
+            first = int(wanted.group(1))
+            last = min(int(wanted.group(2) or len(audio) - 1), len(audio) - 1)
+            return Response(
+                content=audio[first : last + 1],
+                status_code=206,
+                media_type="audio/wav",
+                headers={"Content-Range": f"bytes {first}-{last}/{len(audio)}", "Accept-Ranges": "bytes"},
+            )
+        return Response(content=audio, media_type="audio/wav", headers={"Accept-Ranges": "bytes"})
 
     @router.post("/api/family/lang")
     def set_language(body: Language, user: User = Depends(current_user)):
@@ -340,14 +353,23 @@ def family_router(
         if deps.settings.telegram_bot_name and not user.telegram_chat_id:
             # Every notice about the calls goes to Telegram; with no chat it would reach nobody.
             return refused("telegram_first", 409)
-        if len([p for p in deps.store.list_persons_by_owner(user.uid) if not p.demo]) >= MAX_PERSONS_PER_USER:
+        if len(deps.store.list_persons_by_owner(user.uid)) >= MAX_PERSONS_PER_USER:
             return refused("too_many", 409)
         tz = timezone_at(body.lat, body.lon)
         phone = to_e164(body.phone, tz)
         neighbor_phones = [to_e164(n.phone, tz) for n in body.neighbors]
         if phone is None or None in neighbor_phones:
             return refused("bad_number", 422)
-        if any(p.phone == phone for p in deps.store.list_persons_by_owner(user.uid) if not (p.demo or p.sim)):
+        # A neighbour with her own number, a number twice, or the service's own number: "calling the
+        # neighbour" would ring her again, or nobody who can go to the door.
+        ours = {phone, deps.settings.twilio_from_number} - {""}
+        if (
+            phone == deps.settings.twilio_from_number  # the service would call itself
+            or len(set(neighbor_phones)) < len(neighbor_phones)
+            or ours & set(neighbor_phones)
+        ):
+            return refused("same_number", 422)
+        if any(p.phone == phone for p in deps.store.list_persons_by_owner(user.uid)):
             # A second enrolment of the same number would make every call come in pairs.
             return refused("already_enrolled", 409)
 
@@ -419,8 +441,8 @@ def family_router(
             return refused("not_pending", 409)
         if running(person.id, (EpisodeKind.INTRO,), (*_IN_PROGRESS, EpisodeState.SCHEDULED)):
             return refused("busy", 409)  # one is under way, or planned for the morning
-        intros = [e for e in deps.store.list_episodes(person.id, limit=20) if e.kind == EpisodeKind.INTRO]
-        deps.bus.publish("intro.requested", {"person_id": person.id, "episode_id": f"{person.id}:intro:{after(intros)}"})
+        episodes = deps.store.list_episodes(person.id, limit=20)
+        deps.bus.publish("intro.requested", {"person_id": person.id, "episode_id": f"{person.id}:intro:{after(episodes)}"})
         return {"ok": True, "intro_at_local": intro_at_local(person.tz)}
 
     @router.post("/api/family/persons/{person_id}/neighbors/{neighbor_id}/intro", status_code=202)
@@ -438,15 +460,14 @@ def family_router(
             # A recorded "no" is asked again only once the family says the neighbour agreed to it.
             return refused("agreed_needed", 409)
         planned_or_running = (*_IN_PROGRESS, EpisodeState.SCHEDULED)
-        intros = [
-            e
-            for e in deps.store.list_episodes(person.id, limit=20)
-            if e.kind == EpisodeKind.INTRO_NEIGHBOR and e.neighbor_id == neighbor.id
-        ]
-        if any(e.state in planned_or_running for e in intros):
+        episodes = deps.store.list_episodes(person.id, limit=20)
+        if any(
+            e.kind == EpisodeKind.INTRO_NEIGHBOR and e.neighbor_id == neighbor.id and e.state in planned_or_running
+            for e in episodes
+        ):
             return refused("busy", 409)
         now = bool(body and body.now)
-        intro_id = f"{neighbor.id}:intro:{after(intros)}"  # two quick clicks start one introduction
+        intro_id = f"{neighbor.id}:intro:{after(episodes)}"  # two quick clicks start one introduction
         deps.bus.publish("intro.requested", {"neighbor_id": neighbor.id, "now": now, "episode_id": intro_id})
         log.info("neighbour %s asked again (was %s)", neighbor.id, neighbor.status.value)
         return {"ok": True, "intro_at_local": None if now else intro_at_local(person.tz)}

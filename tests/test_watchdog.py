@@ -21,10 +21,11 @@ def test_a_check_whose_neighbour_call_was_lost_is_closed_and_the_family_is_told(
     sys.clock.advance(46 * 60)
     assert run_watchdog(sys.deps) == [ep_id]
     ep = sys.deps.store.get_episode(ep_id)
-    assert (ep.state, ep.result) == (EpisodeState.CLOSED, Result.UNCONFIRMED)
-    assert notices(sys) == [("lost_track", True)]
+    # No neighbour had gone to look yet: "not delivered", not "the neighbour did not report back".
+    assert (ep.state, ep.result) == (EpisodeState.CLOSED, Result.NOT_DELIVERED)
+    assert notices(sys) == [("lost_track_unwell", True)]  # she had said she is not well: the family is told so
     assert "family_notified" in [e.type for e in sys.deps.store.list_timeline(ep_id)]
-    assert run_watchdog(sys.deps) == [] and notices(sys) == [("lost_track", True)]  # once is enough
+    assert run_watchdog(sys.deps) == [] and notices(sys) == [("lost_track_unwell", True)]  # once is enough
 
 
 def test_a_check_waiting_for_its_follow_up_is_left_alone(sys):
@@ -87,8 +88,10 @@ def test_a_check_that_moves_while_the_watchdog_looks_is_left_alone(sys):
         return found
 
     sys.deps.store.list_open_episodes = listed_then_moved
+    sys.deps.notifier.sent.clear()
     assert run_watchdog(sys.deps) == []
     assert sys.deps.store.get_episode(ep_id).state == EpisodeState.WAITING_FOLLOWUP
+    assert notices(sys) == [("neighbor_going", False)]  # and no alarm about a check that is moving
 
 
 
@@ -98,4 +101,86 @@ def test_a_heads_up_whose_timer_was_lost_is_reported_quietly(sys):
     )
     sys.clock.advance(46 * 60)
     assert run_watchdog(sys.deps) == ["h1"]
+    assert notices(sys)[-1] == ("headsup_blocked", False)
+
+
+
+def test_a_heads_up_that_had_already_sent_for_the_neighbour_is_reported_urgently(sys):
+    sys.deps.store.create_episode(
+        make_episode(id="h2", kind=EpisodeKind.HEADSUP, state=EpisodeState.WAITING_FOLLOWUP, due_at=T0, updated_at=T0)
+    )
+    sys.clock.advance(46 * 60)
+    assert run_watchdog(sys.deps) == ["h2"]
+    assert notices(sys)[-1] == ("lost_track", True)
+
+
+def test_a_check_whose_family_could_not_be_told_stays_open_for_the_next_run(sys):
+    for id in ("w1", "w2"):
+        sys.deps.store.create_episode(
+            make_episode(id=id, state=EpisodeState.CALLING_PERSON, due_at=T0, updated_at=T0)
+        )
+    sys.clock.advance(46 * 60)
+    read, broken = sys.deps.store.get_person, []
+
+    def fails_once(person_id):
+        if not broken:
+            broken.append(person_id)
+            raise RuntimeError("database hiccup")
+        return read(person_id)
+
+    sys.deps.store.get_person = fails_once
+    first = run_watchdog(sys.deps)  # one failure must not stop the others
+    assert len(first) == 1
+    assert run_watchdog(sys.deps) == [id for id in ("w1", "w2") if id not in first]
+    assert [n for n in notices(sys) if n == ("lost_track", True)] == [("lost_track", True)] * 2
+
+
+
+def test_the_watchdog_says_she_is_unwell_when_that_is_known(sys):
+    from kuckuc.engine.notify import render_message
+
+    for id, unwell in (("e-silent", False), ("e-unwell", True)):
+        sys.deps.store.create_episode(make_episode(id=id, state=EpisodeState.CALLING_NEIGHBOR, unwell=unwell))
+    sys.clock.advance(46 * 60)
+    assert sorted(run_watchdog(sys.deps)) == ["e-silent", "e-unwell"]
+    assert sorted(notices(sys)) == [("lost_track", True), ("lost_track_unwell", True)]
+    p = {"name": "N", "neighbor": "", "hazard": ""}
+    assert render_message("lost_track_unwell", "sr", p).startswith("HITNO") and "nije dobro" in render_message(
+        "lost_track_unwell", "sr", p
+    )
+    assert render_message("lost_track_unwell", "en", p).startswith("URGENT")
+
+
+def test_a_stalled_check_is_unconfirmed_only_when_a_neighbour_had_gone_to_look(sys):
+    states = {
+        "e-person": EpisodeState.CALLING_PERSON,
+        "e-neighbour": EpisodeState.CALLING_NEIGHBOR,
+        "e-went": EpisodeState.WAITING_FOLLOWUP,
+    }
+    for id, state in states.items():
+        sys.deps.store.create_episode(make_episode(id=id, state=state))
+    sys.clock.advance(46 * 60)
+    run_watchdog(sys.deps)
+    assert {id: sys.deps.store.get_episode(id).result for id in states} == {
+        "e-person": Result.NOT_DELIVERED,
+        "e-neighbour": Result.NOT_DELIVERED,
+        "e-went": Result.UNCONFIRMED,
+    }
+
+
+
+def test_the_watchdog_clears_the_unfinished_step_and_writes_the_closing_row(sys):
+    saved = [{"type": "PlaceCall", "target": "neighbor", "neighbor_index": 0, "script": "neighbor_ask_silent", "delay_s": 0}]
+    sys.deps.store.create_episode(make_episode(id="e-stuck", state=EpisodeState.CALLING_NEIGHBOR, pending=saved))
+    sys.clock.advance(46 * 60)
+    assert run_watchdog(sys.deps) == ["e-stuck"]
+    assert sys.deps.store.get_episode("e-stuck").pending is None  # a late delivery must not carry it out
+    rows = [(e.type, e.public) for e in sys.deps.store.list_timeline("e-stuck")]
+    assert ("episode_closed", {"result": "not_delivered"}) in rows
+
+
+def test_a_heads_up_stalled_while_calling_her_is_reported_quietly(sys):
+    sys.deps.store.create_episode(make_episode(id="h3", kind=EpisodeKind.HEADSUP, state=EpisodeState.CALLING_PERSON))
+    sys.clock.advance(46 * 60)
+    assert run_watchdog(sys.deps) == ["h3"]
     assert notices(sys)[-1] == ("headsup_blocked", False)

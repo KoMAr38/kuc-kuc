@@ -47,7 +47,7 @@ class Store(Protocol):
     def list_episodes(self, person_id: str, limit: int = 20) -> list[Episode]: ...
     def list_open_episodes(self) -> list[Episode]: ...
 
-    def put_call(self, c: CallRecord) -> None: ...
+    def create_call(self, c: CallRecord) -> bool: ...
     def get_call(self, id: str) -> CallRecord | None: ...
     def patch_call(self, id: str, **fields) -> None: ...
     def complete_call(
@@ -101,6 +101,7 @@ class MemoryStore:
         self._demo_spend: dict[date, float] = {}
         self._lock = threading.Lock()
         self._stat_docs: dict[str, dict] = {}
+        self._placed_by_day: dict[str, int] = {}  # as Firestore counts: one per call that rang, by UTC day
 
     # users
     def get_user(self, uid: str) -> User | None:
@@ -182,8 +183,13 @@ class MemoryStore:
         return [e.model_copy(deep=True) for e in self._episodes.values() if e.state != EpisodeState.CLOSED]
 
     # calls
-    def put_call(self, c: CallRecord) -> None:
-        self._calls[c.id] = c.model_copy(deep=True)
+    def create_call(self, c: CallRecord) -> bool:
+        """Stores the call only if it does not exist yet."""
+        with self._lock:
+            if c.id in self._calls:
+                return False
+            self._calls[c.id] = c.model_copy(deep=True)
+            return True
 
     def get_call(self, id: str) -> CallRecord | None:
         return _copy(self._calls.get(id))
@@ -238,11 +244,14 @@ class MemoryStore:
 
     def mark_placed(self, call_id: str, provider_sid: str) -> bool:
         """"dialing" becomes "placed"; any other status (a call already finished) stays as it is."""
-        call = self._calls.get(call_id)
-        if call is None or call.status != "dialing":
-            return False
-        self._calls[call_id] = call.model_copy(update={"status": "placed", "provider_sid": provider_sid})
-        return True
+        with self._lock:
+            call = self._calls.get(call_id)
+            if call is None or call.status != "dialing":
+                return False
+            self._calls[call_id] = call.model_copy(update={"status": "placed", "provider_sid": provider_sid})
+            day = self._now().astimezone(UTC).date().isoformat()
+            self._placed_by_day[day] = self._placed_by_day.get(day, 0) + 1
+            return True
 
     def claim_recording(self, call_id: str, n: int) -> bool:
         """True for the first caller only: a recording delivered twice is handled once."""
@@ -286,11 +295,12 @@ class MemoryStore:
             for key, limit, refusal in quotas:
                 if self._demo_counts.get((day, key), 0) >= limit:
                     return refusal
-            if self._demo_spend.get(day, 0.0) + usd > cap_usd:
+            if usd and self._demo_spend.get(day, 0.0) + usd > cap_usd:
                 return "budget"
             for key, _, _ in quotas:
                 self._demo_counts[(day, key)] = self._demo_counts.get((day, key), 0) + 1
-            self._demo_spend[day] = round(self._demo_spend.get(day, 0.0) + usd, 4)
+            if usd:
+                self._demo_spend[day] = round(self._demo_spend.get(day, 0.0) + usd, 4)
             return None
 
     def add_demo_spend(self, day: date, usd: float) -> float:
@@ -303,11 +313,10 @@ class MemoryStore:
 
     # public counters
     def stats(self) -> dict[str, int]:
-        today = self._now().astimezone(UTC).date()
-        real = [c for c in self._calls.values() if c.provider == "twilio" and c.status in ("placed", "completed")]
+        today = self._now().astimezone(UTC).date().isoformat()
         return {
-            "calls_today": sum(1 for c in real if c.created_at.astimezone(UTC).date() == today),
-            "calls_total": len(real),
+            "calls_today": self._placed_by_day.get(today, 0),
+            "calls_total": sum(self._placed_by_day.values()),
             "persons_active": len(self.list_active_persons()),
         }
 

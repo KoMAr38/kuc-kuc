@@ -84,6 +84,10 @@
     err_busy: { sr: "Poziv je već u toku ili zakazan.", en: "A call is already under way or planned." },
     err_not_active: { sr: "Osoba još nije dala pristanak ili je pauzirana.", en: "The person has not consented yet, or is paused." },
     err_generic: { sr: "Nešto nije uspelo. Pokušaj ponovo.", en: "Something went wrong. Try again." },
+    err_same_number: {
+      sr: "Svaki broj mora biti drugačiji: osoba, svaki komšija i Kuc-kuc imaju svoj broj.",
+      en: "Every number must be different: the person, each neighbour and Kuc-kuc each have their own."
+    },
     err_too_many: {
       sr: "Već pratiš najveći broj osoba za jedan nalog.",
       en: "You already follow the most people one account can."
@@ -150,15 +154,15 @@
   };
 
   var app = document.getElementById("family-app");
+  if (!app) {
+    return;
+  }
   // Until when an introduction may ring where the person lives; later, the family is asked first.
   var INTRO_START = Number(app.getAttribute("data-intro-start")) || 8;
   var INTRO_END = Number(app.getAttribute("data-intro-end")) || 23;
   // The hours the service itself calls in; outside them "Call now" asks first. From the settings.
   var CALL_START = Number(app.getAttribute("data-call-start")) || 8;
   var CALL_END = Number(app.getAttribute("data-call-end")) || 20;
-  if (!app) {
-    return;
-  }
   var $ = function (id) {
     return document.getElementById(id);
   };
@@ -296,7 +300,7 @@
       details.dataset.id = episode.id;
       details.open = opened ? !!opened[episode.id] : index === 0;
       var result = episode.result ? t("r_" + episode.result) : t(episode.state === "scheduled" ? "r_scheduled" : "r_running");
-      if (!episode.result && episode.state !== "scheduled") {
+      if (isRunning([episode])) {
         running = true;
       }
       var summary = el("summary", null, when(episode.created_at) + " · " + t("kind_" + episode.kind) + " · " + result);
@@ -339,10 +343,24 @@
     });
   }
 
+  // The server says which episodes are still to be watched: until the closing row is written, or two
+  // minutes after the close should that row never come. (By the server's clock, not this computer's.)
   function isRunning(episodes) {
     return episodes.some(function (episode) {
-      return !episode.result && episode.state !== "scheduled";
+      return episode.running;
     });
+  }
+
+  // One way to read a failed reply: an expired sign-in shows the page signed out; anything else
+  // keeps the page as it is and says so.
+  function failed(result) {
+    if (result.status === 401) {
+      state.me = null;
+      render();
+      return;
+    }
+    var key = "err_" + ((result.data && result.data.code) || "generic");
+    say(TEXT[key] ? t(key) : t("err_generic"), "error");
   }
 
   function loadForecast(person, box) {
@@ -380,14 +398,19 @@
         var later = result.data && result.data.intro_at_local;
         say(later ? t("intro_later", { time: later }) : okText || "");
         // The engine starts the call a few seconds later: keep looking for a minute even before it shows.
+        // Only what changed is drawn again, and a passing error is looked at again later instead of
+        // turning "Started" into "Something went wrong" (or stopping a recording someone is playing).
         state.expecting = Date.now() + 60000;
-        return refresh();
+        buttons.forEach(function (button) {
+          button.disabled = false;
+        });
+        poll();
+        return null;
       }
       buttons.forEach(function (button) {
         button.disabled = false;
       });
-      var key = "err_" + (result.data.code || "generic");
-      say(TEXT[key] ? t(key) : t("err_generic"), "error");
+      failed(result);
       return null;
     });
   }
@@ -625,7 +648,13 @@
 
   function refresh() {
     return api("GET", "/api/family/me").then(function (result) {
-      state.me = result.ok ? result.data : null;
+      if (result.ok) {
+        state.me = result.data;
+      } else if (result.status === 401) {
+        state.me = null;
+      } else if (state.me) {
+        say(t("err_generic"), "error"); // a passing failure: keep the page as it is
+      }
       if (state.me && !hasStoredLanguage()) {
         state.lang = state.me.lang === "sr" ? "sr" : "en";
       }
@@ -792,8 +821,7 @@
     }).then(function (result) {
       submit.disabled = false;
       if (!result.ok) {
-        var code = result.data.code;
-        say(TEXT["err_" + code] ? t("err_" + code) : t("err_generic"), "error");
+        failed(result);
         return;
       }
       form.reset();
@@ -803,7 +831,10 @@
       $("add-person").open = false;
       var later = result.data && result.data.intro_at_local;
       say(later ? t("enrolled_later", { time: later }) : t("enrolled"));
-      refresh();
+      // The introduction calls start a few seconds later: keep looking for a minute. The new card is
+      // drawn by the same look that follows every change.
+      state.expecting = Date.now() + 60000;
+      poll();
     });
   });
 

@@ -51,6 +51,14 @@ guard_live_calls() {
   exit 1
 }
 TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
+# The version is named after the commit: changes not committed would run under a name that hides them.
+if git rev-parse --git-dir >/dev/null 2>&1 && ! git diff --quiet HEAD --; then
+  if [ "${ALLOW_DIRTY:-}" != "1" ]; then
+    echo "There are changes not committed to git. Commit them first, or set ALLOW_DIRTY=1." >&2
+    exit 1
+  fi
+  TAG="$TAG-dirty-$(date +%Y%m%d%H%M%S)"
+fi
 IMAGE="$REGION-docker.pkg.dev/$PROJECT/$REPO/app:$TAG"
 
 say "Building $IMAGE"

@@ -36,28 +36,40 @@ def _stuck(ep: Episode, now: datetime) -> bool:
 def _result(ep: Episode) -> Result:
     if ep.kind in _INTROS:
         return Result.NO_CONSENT
-    return Result.NOT_DELIVERED if ep.state == EpisodeState.SCHEDULED else Result.UNCONFIRMED
+    # "The neighbour did not report back" only when a neighbour had gone to look.
+    return Result.UNCONFIRMED if ep.state == EpisodeState.WAITING_FOLLOWUP else Result.NOT_DELIVERED
 
 
 def run_watchdog(deps: Deps) -> list[str]:
     """Closes every check that has stopped moving and tells the family. Returns the ids closed."""
     now = deps.clock.now()
     closed = []
-    for ep in deps.store.list_open_episodes():
-        if not _stuck(ep, now):
+    for listed in deps.store.list_open_episodes():
+        if not _stuck(listed, now):
             continue
-        result = _result(ep)
+        try:
+            # Read again just before telling anyone: one that moved since the listing is not stuck,
+            # and the family must not be alarmed about a check that is moving.
+            ep = deps.store.get_episode(listed.id)
+            if ep is None or (ep.state, ep.updated_at) != (listed.state, listed.updated_at):
+                continue
+            result = _result(ep)
 
-        def close(current: Episode, seen: Episode = ep, result: Result = result) -> Episode | None:
-            if current.state != seen.state or current.updated_at != seen.updated_at:
-                return None  # it moved since we looked: not stuck after all
-            update = {"state": EpisodeState.CLOSED, "result": result, "updated_at": now, "pending": None}
-            return current.model_copy(update=update)
+            def close(current: Episode, seen: Episode = ep, result: Result = result) -> Episode | None:
+                if current.state != seen.state or current.updated_at != seen.updated_at:
+                    return None  # it moved since we looked: not stuck after all
+                update = {"state": EpisodeState.CLOSED, "result": result, "updated_at": now, "pending": None}
+                return current.model_copy(update=update)
 
-        if deps.store.update_episode(ep.id, close) is None:
+            # The family is told first: if that fails, the check stays open and the next run tries
+            # again. (Closed first, a failure here lost the message for good.)
+            _tell_family(deps, ep)
+            if deps.store.update_episode(ep.id, close) is None:
+                continue
+            deps.store.add_timeline(ep.id, "episode_closed", {"result": result.value})
+        except Exception:
+            log.exception("episode %s could not be closed now; the next run tries again", listed.id)
             continue
-        deps.store.add_timeline(ep.id, "episode_closed", {"result": result.value})
-        _tell_family(deps, ep)
         log.error("episode %s had stopped moving (%s); closed as %s", ep.id, ep.state.value, result.value)
         closed.append(ep.id)
     log.info("watchdog: %d stopped checks closed", len(closed))
@@ -74,10 +86,10 @@ def _tell_family(deps: Deps, ep: Episode) -> None:
         name = neighbor.name if neighbor else name
     if ep.kind in _INTROS:
         key, urgent = "intro_lost", False
-    elif ep.kind == EpisodeKind.HEADSUP:
-        key, urgent = "headsup_blocked", False  # the day before: tomorrow's check still comes
+    elif ep.kind == EpisodeKind.HEADSUP and ep.state in (EpisodeState.SCHEDULED, EpisodeState.CALLING_PERSON):
+        key, urgent = "headsup_blocked", False  # the day before, nothing happened yet: tomorrow's check still comes
     else:
-        key, urgent = "lost_track", True
+        key, urgent = ("lost_track_unwell" if ep.unwell else "lost_track"), True
     params = {"name": name, "neighbor": "", "hazard": ep.hazard or ""}
     delivered = deps.notifier.send(person.owner_uid, key, params, urgent)
     deps.store.add_timeline(

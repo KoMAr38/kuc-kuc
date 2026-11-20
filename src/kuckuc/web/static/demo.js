@@ -8,7 +8,7 @@
     country: "The live demo can only call numbers in the United States, Canada, the United Kingdom and Norway.",
     number_type: "That is a premium, toll-free or special number. The demo only calls ordinary mobile and home lines.",
     own_number: "That is the number Kuc-kuc calls from. Enter the number of your own phone instead.",
-    phone_limit: "This number has had its two demo calls for today. Come back tomorrow.",
+    phone_limit: "This number has reached today's demo limit. Come back tomorrow.",
     ip_limit: "Too many tries from this network today. Come back tomorrow.",
     budget: "Today's demo budget is spent. Real calls cost real money.",
     busy: "The demo is busy for a moment. Try again in a few seconds.",

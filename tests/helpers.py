@@ -43,7 +43,7 @@ def seed_person_calls(sys: LocalSystem, person_id: str, n: int) -> None:
     """Calls the person already received today."""
     sys.deps.store.create_episode(make_episode(id="seed-ep", person_id=person_id))
     for i in range(n):
-        sys.deps.store.put_call(make_call(id=f"seed-{i}", episode_id="seed-ep", status="completed"))
+        sys.deps.store.create_call(make_call(id=f"seed-{i}", episode_id="seed-ep", status="completed"))
 
 
 def complete(sys: LocalSystem, call: CallRecord, answer: Answer) -> None:

@@ -32,6 +32,7 @@ class Voice:
     client: TestClient
     sleeps: list[float] = field(default_factory=list)
     on_sleep: object = None
+    now: float = 0.0  # the service's stopwatch: moved by its naps, and by whatever a test says takes time
 
     def twilio_post(self, path, data=None):
         return self.client.post(path, data=data or {}, headers={"X-Twilio-Signature": "sig"})
@@ -49,19 +50,20 @@ def build_voice(verify_oidc=lambda r: True) -> Voice:
     deps.tts = FakeTts()
     deps.interpreter = FakeInterpreter()
     deps.store.create_episode(make_episode(id="e1"))
-    deps.store.put_call(make_call(id="c1"))
-    deps.store.put_call(make_call(id="c2"))
-    deps.store.put_call(
+    deps.store.create_call(make_call(id="c1"))
+    deps.store.create_call(make_call(id="c2"))
+    deps.store.create_call(
         make_call(id="c3", provider="simulated", params={"name": "Sim", "sim_answer": "needs_help"})
     )
     v = Voice(deps=deps, client=None)
 
     def sleep(seconds):
         v.sleeps.append(seconds)
+        v.now += seconds
         if v.on_sleep:
             v.on_sleep()
 
-    v.client = TestClient(create_voice_app(deps, verify_oidc=verify_oidc, sleep=sleep))
+    v.client = TestClient(create_voice_app(deps, verify_oidc=verify_oidc, sleep=sleep, monotonic=lambda: v.now))
     return v
 
 
@@ -79,7 +81,7 @@ def xml(text):
 
 def test_a_demo_call_rings_for_less_time_so_a_visitor_does_not_wait_minutes(voice):
     voice.deps.store.create_episode(make_episode(id="demo-e9"))
-    voice.deps.store.put_call(make_call(id="demo-c9", episode_id="demo-e9"))
+    voice.deps.store.create_call(make_call(id="demo-c9", episode_id="demo-e9"))
     assert voice.client.post("/calls/start", json={"call_id": "demo-c9"}).status_code == 200
     assert voice.deps.telephony.placed[0].ring_timeout_s == 25
 
@@ -265,7 +267,7 @@ def test_a_repeated_recording_report_gets_only_the_neutral_goodbye(voice):
 
 
 def test_simulated_call_with_no_prepared_answer_is_unclear(voice):
-    voice.deps.store.put_call(make_call(id="c4", provider="simulated", params={"name": "Sim"}))
+    voice.deps.store.create_call(make_call(id="c4", provider="simulated", params={"name": "Sim"}))
     assert voice.client.post("/calls/start", json={"call_id": "c4"}).status_code == 200
     assert voice.deps.store.get_call("c4").answer == Answer.UNCLEAR
 
@@ -607,3 +609,132 @@ def test_a_call_that_already_ended_on_our_side_only_says_goodbye_when_picked_up(
     voice.deps.store.complete_call("c1", Answer.NO_ANSWER, None, None)
     body = voice.twilio_post("/twiml/c1").text
     assert "<Record" not in body and "call_answered" not in [type for type, _ in voice.timeline()]
+
+
+
+# --- audit 17 Nov, third round --------------------------------------------------------------
+
+
+def test_a_failure_inside_a_call_still_answers_the_phone_company_with_valid_instructions():
+    # A 500 makes Twilio play its own error message, in English, to the person on the line.
+    v = build_voice()
+    v.client = TestClient(v.client.app, raise_server_exceptions=False)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    v.deps.store.claim_recording = broken
+    reply = v.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    assert reply.status_code == 200 and "<Hangup/>" in reply.text
+
+
+def test_the_answer_reaches_the_engine_even_when_writing_the_history_row_fails(voice):
+    def broken(*args, **kwargs):
+        raise RuntimeError("timeline unavailable")
+
+    voice.deps.store.add_timeline = broken
+    voice.deps.interpreter.answers = [Answer.NEEDS_HELP]
+    voice.twilio_post("/recording/c1?n=1", {"RecordingUrl": "https://x/r1"})
+    assert [d["answer"] for d in voice.published("call.completed")] == ["needs_help"]
+
+
+def test_when_a_call_ends_every_recording_of_it_is_deleted_at_the_provider(voice):
+    # Sent when the line closes, a reply nobody hears; also for a call that already ended here.
+    voice.twilio_post("/status/c1", {"CallStatus": "completed", "CallSid": "CA" + "1" * 32})
+    voice.deps.store.complete_call("c2", Answer.OK, None, None)
+    voice.twilio_post("/status/c2", {"CallStatus": "completed", "CallSid": "CA" + "2" * 32})
+    assert voice.deps.telephony.swept == ["CA" + "1" * 32, "CA" + "2" * 32]
+
+
+
+# --- audit 20 Nov, fourth round -------------------------------------------------------------
+
+
+def broken_history(*args, **kwargs):
+    raise RuntimeError("timeline unavailable")
+
+
+def test_a_stopped_call_reaches_the_engine_even_when_its_history_row_fails(voice):
+    voice.deps.store.add_timeline = broken_history
+    voice.deps.store.runtime.kill_switch = True
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert voice.published("call.blocked") == [{"call_id": "c1", "episode_id": "e1", "reason": "kill_switch"}]
+
+
+def test_a_refused_number_reaches_the_engine_even_when_its_history_row_fails(voice):
+    from kuckuc.telephony.twilio_provider import TelephonyError
+
+    def refuse(*args, **kwargs):
+        raise TelephonyError("call not placed: HTTP 400, provider code 21215", status=400, code="21215")
+
+    voice.deps.store.add_timeline = broken_history
+    voice.deps.telephony.place_call = refuse
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert [d["reason"] for d in voice.published("call.blocked")] == ["refused"]
+
+
+def test_a_placed_call_is_not_reported_as_failed_when_its_history_row_fails(voice):
+    voice.deps.store.add_timeline = broken_history
+    r = voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert r.status_code == 200 and voice.deps.store.get_call("c1").status == "placed"
+
+
+def test_a_picked_up_call_is_asked_its_question_even_when_its_history_row_fails(voice):
+    voice.deps.store.add_timeline = broken_history
+    r = voice.twilio_post("/twiml/c1")
+    assert [el.tag for el in xml(r.text)] == ["Play", "Record", "Redirect"]
+
+
+def test_the_hang_up_wait_is_measured_by_the_clock_not_by_counting_naps(voice):
+    # Each look at the database takes time too: counted in naps, the reply reached the provider after
+    # its own 15 seconds.
+    from kuckuc.voice.app import HANGUP_GRACE_S, PROVIDER_WAIT_S
+
+    look = voice.deps.store.get_call
+
+    def slow_look(call_id):
+        voice.now += 0.1  # a database read
+        return look(call_id)
+
+    voice.deps.store.get_call = slow_look
+    voice.twilio_post("/status/c1", {"CallStatus": "completed"})
+    assert look("c1").answer == Answer.UNCLEAR
+    assert HANGUP_GRACE_S <= voice.now < PROVIDER_WAIT_S
+
+
+def test_a_request_signed_as_twilio_signs_it_is_accepted_and_a_changed_one_refused():
+    import twilio.request_validator
+
+    from kuckuc.telephony.twilio_provider import TwilioTelephony
+
+    v = build_voice()
+    v.deps.telephony = TwilioTelephony("AC1", "secret", "+15005550006", http=object())
+    params = {"CallSid": "CA" + "1" * 32, "CallStatus": "ringing", "AccountSid": "AC1"}
+    signature = twilio.request_validator.RequestValidator("secret").compute_signature(f"{BASE}/status/c1", params)
+    signed = v.client.post("/status/c1", data=params, headers={"X-Twilio-Signature": signature})
+    changed = v.client.post(
+        "/status/c1", data=params | {"CallStatus": "completed"}, headers={"X-Twilio-Signature": signature}
+    )
+    assert (signed.status_code, changed.status_code) == (200, 403)
+
+
+
+def test_a_failure_when_the_phone_is_picked_up_still_answers_with_valid_instructions():
+    v = build_voice()
+    v.client = TestClient(v.client.app, raise_server_exceptions=False)
+    v.deps.store.get_call = broken_history
+    reply = v.twilio_post("/twiml/c1")
+    assert reply.status_code == 200 and [el.tag for el in xml(reply.text)] == ["Hangup"]
+
+
+def test_a_call_reported_busy_while_still_dialling_never_gets_a_placed_row(voice):
+    original = voice.deps.telephony.place_call
+
+    def place_then_busy(*args, **kwargs):
+        sid = original(*args, **kwargs)
+        voice.deps.store.complete_call("c1", Answer.NO_ANSWER, None, None)  # "busy" reached another server
+        return sid
+
+    voice.deps.telephony.place_call = place_then_busy
+    voice.client.post("/calls/start", json={"call_id": "c1"})
+    assert "call_placed" not in [t for t, _ in voice.timeline()]

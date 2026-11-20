@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 
 from kuckuc.ports import Clock
 
+SIM_CALL_WAIT_S = 1
+
 log = logging.getLogger(__name__)
 
 
@@ -41,6 +43,11 @@ class CloudTasksQueue:
         self._clock = clock
 
     def enqueue_call(self, call_id: str, delay_s: int, sim: bool = False) -> None:
+        if sim:
+            # A simulated call answers at once. Sent with no wait, its result can reach the engine
+            # before the step that queued it is saved as done; the engine then asks for it again and
+            # Pub/Sub waits ten seconds or more. In memory the bus delivers in order and needs no wait.
+            delay_s = max(delay_s, SIM_CALL_WAIT_S)
         when = self._clock.now() + timedelta(seconds=delay_s) if delay_s > 0 else None
         self.client.create(
             parent=f"{self._queues}/{'calls-sim' if sim else 'calls'}",

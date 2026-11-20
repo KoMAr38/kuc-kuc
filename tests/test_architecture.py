@@ -3,7 +3,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
-from factories import make_call, make_person
+from factories import T0, make_call, make_person
 from fastapi.testclient import TestClient
 from helpers import build_sys
 
@@ -25,8 +25,15 @@ def test_stats_shape(web):
     assert set(web.get("/api/stats").json()) == {"calls_today", "calls_total", "persons_active", "loadtest"}
 
 
+def ring(store, id):
+    """A call as voice makes one: created, dialled, placed."""
+    store.create_call(make_call(id=id))
+    store.start_dialing(id, T0)
+    store.mark_placed(id, "CA" + id)
+
+
 def test_stats_count_real_calls_and_people_and_have_no_load_test_by_default(web):
-    web.deps.store.put_call(make_call(id="c1", status="completed"))
+    ring(web.deps.store, "c1")
     web.deps.store.put_person(make_person(id="demo-1", demo=True))
     assert web.get("/api/stats").json() == {"calls_today": 1, "calls_total": 1, "persons_active": 1, "loadtest": None}
 
@@ -75,7 +82,7 @@ def test_architecture_explains_the_parts_and_the_reasons(web):
 
 def test_architecture_shows_the_counters_from_storage(web):
     for i in range(3):
-        web.deps.store.put_call(make_call(id=f"c{i}", status="completed"))
+        ring(web.deps.store, f"c{i}")
     html = web.get("/architecture").text
     assert re.search(r'id="stat-calls-total"[^>]*>\s*3\s*<', html)
     assert re.search(r'id="stat-persons-active"[^>]*>\s*1\s*<', html)
@@ -113,3 +120,17 @@ def test_diagram_is_well_formed_for_every_combination_of_features():
 def test_static_diagram_file_is_the_full_diagram_and_up_to_date():
     saved = (WEB_DIR / "static" / "architecture.svg").read_text(encoding="utf-8")
     assert saved == render_diagram(ALL), "run: python -m kuckuc.web.diagram"
+
+
+
+def test_the_public_numbers_are_read_from_the_database_at_most_every_half_minute(web):
+    reads = []
+    stats = web.deps.store.stats
+    web.deps.store.stats = lambda: reads.append(1) or stats()
+    web.get("/api/stats")
+    web.get("/architecture")
+    web.get("/api/stats")
+    assert len(reads) == 1
+    web.deps.clock.advance(31)
+    web.get("/api/stats")
+    assert len(reads) == 2

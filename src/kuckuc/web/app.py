@@ -34,6 +34,8 @@ CONTENT_SECURITY_POLICY_SIGN_IN = (
 
 SESSION_DAYS = 14
 
+PUBLIC_NUMBERS_KEEP_S = 30
+
 
 def _httpx_get(url: str, params: dict) -> dict:
     import httpx
@@ -96,8 +98,14 @@ def create_web_app(
         }
         return templates.TemplateResponse(request, name, context)
 
-    def latest_loadtest() -> dict | None:
-        return deps.store.get_stat_doc("loadtest_latest")
+    # Three database reads per visit: during a launch, every visitor (and every script) would pay them.
+    numbers: dict = {"at": None, "stats": {}, "loadtest": None}
+
+    def public_numbers() -> tuple[dict, dict | None]:
+        now = deps.clock.now()
+        if numbers["at"] is None or (now - numbers["at"]).total_seconds() >= PUBLIC_NUMBERS_KEEP_S:
+            numbers.update(at=now, stats=deps.store.stats(), loadtest=deps.store.get_stat_doc("loadtest_latest"))
+        return numbers["stats"], numbers["loadtest"]
 
     @app.get("/")
     def index(request: Request):
@@ -119,11 +127,13 @@ def create_web_app(
     @app.get("/architecture")
     def architecture(request: Request):
         """Describes only what is live: sections for parts not in ``settings.features`` are left out."""
-        return page(request, "architecture.html", stats=deps.store.stats(), loadtest=latest_loadtest())
+        stats, loadtest = public_numbers()
+        return page(request, "architecture.html", stats=stats, loadtest=loadtest)
 
     @app.get("/api/stats")
     def stats() -> dict:
-        return {**deps.store.stats(), "loadtest": latest_loadtest()}
+        stats, loadtest = public_numbers()
+        return {**stats, "loadtest": loadtest}
 
     # Cloud Run's front end keeps /healthz for itself, so the check is also served at /health.
     @app.get("/health")

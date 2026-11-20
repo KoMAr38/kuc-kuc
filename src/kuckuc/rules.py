@@ -30,9 +30,9 @@ def hazards_for(days: list[DayWeather], settings: Settings) -> list[HazardDay]:
     found = []
     for d in days:
         crossed: dict[Hazard, float] = {}
-        if d.apparent_max_c >= settings.heat_apparent_c:
+        if d.apparent_max_c is not None and d.apparent_max_c >= settings.heat_apparent_c:
             crossed["heat"] = d.apparent_max_c
-        if d.temp_min_c <= settings.cold_temp_c:
+        if d.temp_min_c is not None and d.temp_min_c <= settings.cold_temp_c:
             crossed["cold"] = d.temp_min_c
         if d.snow_cm >= settings.snow_cm:
             crossed["snow"] = d.snow_cm

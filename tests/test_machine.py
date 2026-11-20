@@ -313,3 +313,20 @@ def test_a_blocked_heads_up_is_a_quiet_note_because_nothing_has_happened_yet():
 
     ep, acts = run(EpisodeKind.HEADSUP, [Due(), CallBlocked("kill_switch")])
     assert ep.result == Result.NOT_DELIVERED and Notify("headsup_blocked", False) in acts
+
+
+
+def test_a_heads_up_where_she_is_unwell_and_the_neighbours_call_is_blocked_is_urgent():
+    from kuckuc.engine.machine import CallBlocked
+
+    unwell = CallDone(Target.PERSON, ScriptKind.HEADSUP, Answer.NEEDS_HELP)
+    ep, acts = run(EpisodeKind.HEADSUP, [Due(), unwell, CallBlocked("kill_switch")])
+    assert ep.result == Result.BLOCKED and Notify("call_blocked", True) in acts
+    assert Notify("headsup_blocked", False) not in acts
+
+
+def test_a_refused_number_on_a_heads_up_is_reported_at_once():
+    from kuckuc.engine.machine import CallBlocked
+
+    ep, acts = run(EpisodeKind.HEADSUP, [Due(), CallBlocked("refused")])
+    assert ep.result == Result.NOT_DELIVERED and Notify("call_refused", True) in acts

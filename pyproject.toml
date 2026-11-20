@@ -21,7 +21,6 @@ dependencies = [
   "phonenumbers>=8.13",
   "tzdata>=2024.1",
   "timezonefinder>=6.5",
-  "twilio>=9.0",
   "google-auth>=2.29",
   "google-cloud-firestore>=2.16",
   "google-cloud-pubsub>=2.21",
@@ -32,7 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "twilio>=9.0"]  # tests check our webhook signatures against the Twilio SDK
 
 [tool.setuptools.packages.find]
 where = ["src"]

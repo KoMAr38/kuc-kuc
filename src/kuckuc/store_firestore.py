@@ -10,6 +10,7 @@ tests see in memory. Three things are added on top because Firestore needs them:
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 
@@ -63,6 +64,8 @@ def _utc_now() -> datetime:
 def _eq(field: str, value) -> FieldFilter:
     return FieldFilter(field, "==", value)
 
+
+log = logging.getLogger(__name__)
 
 RESERVE_ATTEMPTS = 6
 
@@ -187,16 +190,16 @@ class FirestoreStore:
         return [Episode.model_validate(s.to_dict()) for s in query.stream()]
 
     # calls
-    def put_call(self, c: CallRecord) -> None:
+    def create_call(self, c: CallRecord) -> bool:
+        return self._create("calls", c.id, c, **self._call_fields(c))
+
+    def _call_fields(self, c: CallRecord) -> dict:
         episode = self.get_episode(c.episode_id)
-        self._put(
-            "calls",
-            c.id,
-            c,
-            person_id=episode.person_id if episode else "",
-            day=c.local_day or c.created_at.astimezone(UTC).date().isoformat(),
+        return {
+            "person_id": episode.person_id if episode else "",
+            "day": c.local_day or c.created_at.astimezone(UTC).date().isoformat(),
             **self._demo_ttl(c.episode_id),
-        )
+        }
 
     def get_call(self, id: str) -> CallRecord | None:
         return self._get("calls", id, CallRecord)
@@ -207,13 +210,6 @@ class FirestoreStore:
             self._col("calls").document(id).update(plain)
         except gexc.NotFound:
             return
-        if plain.get("status") == "placed":
-            # Only real calls are ever "placed"; this feeds the public counters.
-            today = self._now().astimezone(UTC).date().isoformat()
-            self._col("stats").document(_COUNTERS).set(
-                {"calls_total": firestore.Increment(1), "calls_by_day": {today: firestore.Increment(1)}},
-                merge=True,
-            )
 
     def claim_recording(self, call_id: str, n: int) -> bool:
         """Creating the claim fails if another server created it first, so exactly one wins."""
@@ -249,7 +245,18 @@ class FirestoreStore:
             transaction.update(ref, {"status": "placed", "provider_sid": provider_sid})
             return True
 
-        return run(self._db.transaction())
+        if not run(self._db.transaction()):
+            return False
+        # Only real calls are ever placed; this feeds the public counters on the architecture page.
+        # The phone is already ringing: a counter that cannot be written is logged, never a failure.
+        try:
+            today = self._now().astimezone(UTC).date().isoformat()
+            self._col("stats").document(_COUNTERS).set(
+                {"calls_total": firestore.Increment(1), "calls_by_day": {today: firestore.Increment(1)}}, merge=True
+            )
+        except Exception as exc:
+            log.error("call %s: public counter not updated (%s)", call_id, type(exc).__name__)
+        return True
 
     def complete_call(
         self, id: str, answer: Answer, transcript: str | None, recording_key: str | None
@@ -327,26 +334,33 @@ class FirestoreStore:
             for ref, limit, refusal in refs:
                 snap = ref.get(transaction=transaction)
                 counts.append(int((snap.to_dict() or {}).get("n", 0)) if snap.exists else 0)
-            spend = spend_ref.get(transaction=transaction)
-            spent = float((spend.to_dict() or {}).get("usd", 0.0)) if spend.exists else 0.0
+            spent = 0.0
+            if usd:  # counting without money never touches the day's spend document
+                spend = spend_ref.get(transaction=transaction)
+                spent = float((spend.to_dict() or {}).get("usd", 0.0)) if spend.exists else 0.0
             for (ref, limit, refusal), n in zip(refs, counts, strict=True):
                 if n >= limit:
                     return refusal
-            if spent + usd > cap_usd:
+            if usd and spent + usd > cap_usd:
                 return "budget"
             for (ref, _, _), n in zip(refs, counts, strict=True):
                 transaction.set(ref, {"n": n + 1, "day": day.isoformat(), "expires_at": expires})
-            transaction.set(spend_ref, {"usd": round(spent + usd, 4)}, merge=True)
+            if usd:
+                transaction.set(spend_ref, {"usd": round(spent + usd, 4)}, merge=True)
             return None
 
         # Many visitors at once all want the day's counter: Firestore aborts all but one of the
         # colliding transactions. Try again after a short, random pause; only then say "busy".
+        last: Exception | None = None
         for attempt in range(RESERVE_ATTEMPTS):
             try:
                 return run(self._db.transaction())
-            except (gexc.Aborted, ValueError):
+            except (gexc.Aborted, ValueError) as exc:
+                last = exc
                 if attempt + 1 < RESERVE_ATTEMPTS:
                     time.sleep(random.uniform(0.05, 0.3) * (attempt + 1))
+        # "Busy" can also hide a real failure: the last reason is written down.
+        log.warning("demo reservation busy after %d tries (%s: %s)", RESERVE_ATTEMPTS, type(last).__name__, last)
         return "busy"
 
     def add_demo_spend(self, day: date, usd: float) -> float:

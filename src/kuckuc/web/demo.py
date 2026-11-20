@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from kuckuc.deps import Deps
-from kuckuc.models import DemoSession, EpisodeState, Person, PersonStatus
+from kuckuc.models import DemoSession, Person, PersonStatus, finished_for_pages
 from kuckuc.web.demo_limits import (
     DemoRefused,
     address_key,
@@ -41,6 +41,8 @@ TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 VERIFY_STARTS_PER_IP = 10
 # Per number, from any address: our account must not be made to ring or text a stranger again and again.
 VERIFY_STARTS_PER_NUMBER = 3
+# Checking a code is a request to Twilio too: one address may not check without end.
+VERIFY_CHECKS_PER_IP = 30
 # Spoken by the English call, so Fahrenheit.
 SCENARIOS: dict[str, tuple[str, float]] = {"heat": ("heat", 104), "cold": ("cold", 5)}
 _STATUS = {
@@ -134,11 +136,15 @@ def demo_router(deps: Deps) -> APIRouter:
         return {"ok": True}
 
     @router.post("/verify/check")
-    def verify_check(body: VerifyCheck):
+    def verify_check(body: VerifyCheck, request: Request):
         try:
             phone, country = demo_number(body.phone)
         except DemoRefused as refused:
             return _refused(refused.code)
+        quota = [(f"check-ip:{ip_hash(request)}", VERIFY_CHECKS_PER_IP, "ip_limit")]
+        refusal = deps.store.reserve_demo(today(), quota, 0.0, daily_cap_usd(today(), deps.settings))
+        if refusal:
+            return _refused(refusal)
         try:
             approved = deps.verify.check(phone, body.code.strip())
         except Exception as exc:
@@ -219,12 +225,14 @@ def demo_router(deps: Deps) -> APIRouter:
             return {"events": [], "closed": False}
         if episode.demo_session_id != session.id:
             return _refused("forbidden", 403)
-        events = deps.store.list_timeline(episode_id, after_seq=max(after, 0))
+        rows = deps.store.list_timeline(episode_id)
         return {
             "events": [
-                {"seq": e.seq, "at": e.at.isoformat(), "type": e.type, "public": e.public} for e in events
+                {"seq": e.seq, "at": e.at.isoformat(), "type": e.type, "public": e.public}
+                for e in rows
+                if e.seq > max(after, 0)
             ],
-            "closed": episode.state == EpisodeState.CLOSED,
+            "closed": finished_for_pages(episode, rows, deps.clock.now()),
         }
 
     return router

@@ -45,3 +45,28 @@ def test_a_failure_to_look_is_not_reported_as_a_live_call(monkeypatch):
 
     monkeypatch.setattr(firestore, "Client", no_credentials)
     assert live_calls_module.main() == 2
+
+
+
+def test_a_missing_library_is_not_reported_as_a_live_call(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_firestore(name, *args, **kwargs):
+        if name.startswith("google.cloud"):
+            raise ImportError("no Google libraries here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_firestore)
+    assert live_calls_module.main() == 2
+
+
+
+def test_a_call_counts_as_live_for_five_minutes_since_none_lasts_longer_than_two():
+    # 40 s of ringing and a 60 s limit: one still "placed" after five minutes only lost its last report.
+    def placed(minutes):
+        return {"status": "placed", "provider": "twilio", "placed_at": (NOW - timedelta(minutes=minutes)).isoformat()}
+
+    assert live_calls([placed(4)], NOW) == 1
+    assert live_calls([placed(6)], NOW) == 0

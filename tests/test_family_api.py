@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from helpers import build_sys, complete, real_calls
 
-from kuckuc.models import Answer, EpisodeKind, PersonStatus, ScriptKind, Target
+from kuckuc.models import Answer, EpisodeKind, EpisodeState, PersonStatus, ScriptKind, Target
 
 INVITE = "TEST-INVITE"
 PERSON_PHONE = "+14155550106"
@@ -211,7 +211,7 @@ def test_intro_calls_go_to_the_person_and_to_each_neighbour(family):
 def test_me_masks_phone(family):
     enrol(family, neighbors=[{"name": "Dragan", "phone": "+14155550107"}])
     text = family.get("/api/family/me").text
-    assert "+1500555" not in text and "5005550" not in text
+    assert "4155550106" not in text and "4155550107" not in text and "5550106" not in text
     person = family.get("/api/family/me").json()["persons"][0]
     assert person["phone"].endswith("106") and person["neighbors"][0]["phone"].endswith("107")
     assert (person["name"], person["status"], person["place"]) == ("baba Vera", "pending_consent", "Beograd")
@@ -243,7 +243,7 @@ def test_episodes_show_the_timeline_and_what_was_heard(family):
     (call,) = newest["calls"]
     assert (call["role"], call["answer"], call["has_recording"]) == ("person", "ok", True)
     assert {e["kind"] for e in episodes} == {"manual", "intro"}
-    assert "5005550006" not in json.dumps(episodes)
+    assert "4155550106" not in json.dumps(episodes)
 
 
 # --- acting ----------------------------------------------------------------------------------
@@ -778,3 +778,143 @@ def test_personal_and_satellite_numbers_are_never_enrolled(family):
     for number in ("+44 7012 345678", "+881 6 3123 4567"):
         r = family.post("/api/family/persons", json=enrol_body(phone=number))
         assert r.status_code == 422 and r.json()["code"] == "bad_number", number
+
+
+
+# --- audit 17 Nov, third round --------------------------------------------------------------
+
+
+def test_a_family_can_never_call_another_familys_neighbour(family, other_user):
+    pid, nid = missed_neighbour_intro(family)
+    theirs = enrol(other_user, phone="+14155550120")
+    r = other_user.post(f"/api/family/persons/{theirs}/neighbors/{nid}/intro", json={"now": True})
+    assert r.status_code == 404
+
+
+def test_a_neighbours_introduction_planned_for_the_morning_is_not_planned_twice(family):
+    pid, nid = missed_neighbour_intro(family)
+    family.sys.clock.advance(int(13.5 * 3600))  # 23:30 in Belgrade: it waits for 08:00
+    assert family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={}).status_code == 202
+    assert family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={}).status_code == 409
+
+
+def test_a_neighbour_with_the_persons_own_number_or_a_repeated_number_is_refused(family):
+    same_as_person = [{"name": "Dragan", "phone": "+14155550106"}]
+    r = family.post("/api/family/persons", json=enrol_body(neighbors=same_as_person))
+    assert r.status_code == 422 and r.json()["code"] == "same_number"
+    twice = [{"name": "Dragan", "phone": "+14155550107"}, {"name": "Rada", "phone": "+1 415 555 0107"}]
+    r = family.post("/api/family/persons", json=enrol_body(neighbors=twice))
+    assert r.status_code == 422 and r.json()["code"] == "same_number"
+    family.deps.settings.twilio_from_number = "+14155550199"
+    ours = [{"name": "Dragan", "phone": "+14155550199"}]
+    r = family.post("/api/family/persons", json=enrol_body(neighbors=ours))
+    assert r.status_code == 422 and r.json()["code"] == "same_number"
+
+
+def test_a_neighbours_call_again_is_named_after_the_newest_episode_of_any_kind(family):
+    # Named after the newest introduction among the 20 newest episodes, two clicks with many checks
+    # in between both found none, got the same name, and the second rang nobody.
+    from datetime import timedelta
+
+    from factories import make_episode
+
+    pid, nid = missed_neighbour_intro(family)
+    held = hold_events(family)
+
+    def many_checks(tag):
+        for i in range(21):
+            family.sys.clock.advance(60)
+            family.deps.store.create_episode(make_episode(
+                id=f"{tag}-{i}", person_id=pid, state=EpisodeState.CLOSED, created_at=family.sys.clock.now()
+            ))  # fmt: skip
+
+    many_checks("before")
+    family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={"now": True})
+    (first,) = [d["episode_id"] for t, d in held if t == "intro.requested"]
+    family.sys.clock.advance(60)
+    family.deps.store.create_episode(make_episode(  # what the engine makes of that click
+        id=first, person_id=pid, kind=EpisodeKind.INTRO_NEIGHBOR, neighbor_id=nid, state=EpisodeState.CLOSED,
+        created_at=family.sys.clock.now(),
+    ))  # fmt: skip
+    many_checks("after")
+    family.post(f"/api/family/persons/{pid}/neighbors/{nid}/intro", json={"now": True})
+    ids = [d["episode_id"] for t, d in held if t == "intro.requested"]
+    assert len(ids) == 2 and ids[0] != ids[1]
+
+
+def test_a_recording_can_be_fetched_in_parts_as_iphones_ask(family):
+    pid = enrol(family)
+    activate(family, pid)
+    (intro,) = [c for c in real_calls(family.sys) if c.script == ScriptKind.INTRO_PERSON]
+    family.deps.blobs.put("recordings/x.wav", b"RIFF" + bytes(100), "audio/wav")
+    family.deps.store.patch_call(intro.id, recording_key="recordings/x.wav")
+    r = family.get(f"/api/family/recordings/{intro.id}", headers={"Range": "bytes=0-3"})
+    assert r.status_code == 206 and r.content == b"RIFF" and r.headers["content-range"] == "bytes 0-3/104"
+    whole = family.get(f"/api/family/recordings/{intro.id}")
+    assert whole.status_code == 200 and len(whole.content) == 104 and whole.headers["accept-ranges"] == "bytes"
+
+
+
+# --- audit 20 Nov, fourth round -------------------------------------------------------------
+
+
+def test_the_persons_number_may_not_be_the_services_own_number(family):
+    family.deps.settings.twilio_from_number = "+14155550199"
+    r = family.post("/api/family/persons", json=enrol_body(phone="+1 415 555 0199"))
+    assert r.status_code == 422 and r.json()["code"] == "same_number"
+
+
+def test_a_check_closed_long_ago_without_its_closing_row_is_not_shown_as_running(family):
+    # The closing row is written a moment after the episode closes; when that write failed once, the
+    # page used to look for it forever.
+    from datetime import timedelta
+
+    from factories import make_episode
+
+    pid = enrol(family)
+    clock = family.sys.clock
+    episodes = {
+        "closed-long-ago": dict(state=EpisodeState.CLOSED, updated_at=clock.now() - timedelta(minutes=3)),
+        "closed-just-now": dict(state=EpisodeState.CLOSED, updated_at=clock.now()),
+        "planned": dict(state=EpisodeState.SCHEDULED),
+        "calling": dict(state=EpisodeState.CALLING_PERSON),
+    }
+    for id, fields in episodes.items():
+        family.deps.store.create_episode(make_episode(id=id, person_id=pid, **fields))
+    running = {e["id"]: e["running"] for e in family.get(f"/api/family/persons/{pid}/episodes").json() if e["id"] in episodes}
+    assert running == {"closed-long-ago": False, "closed-just-now": True, "planned": False, "calling": True}
+    family.deps.store.add_timeline("closed-just-now", "episode_closed", {"result": "ok"})
+    running = {e["id"]: e["running"] for e in family.get(f"/api/family/persons/{pid}/episodes").json()}
+    assert running["closed-just-now"] is False
+
+
+
+def test_a_recording_asked_for_from_the_middle_past_its_end_or_beyond_it(family):
+    pid = enrol(family)
+    activate(family, pid)
+    (intro,) = [c for c in real_calls(family.sys) if c.script == ScriptKind.INTRO_PERSON]
+    family.deps.blobs.put("recordings/y.wav", b"RIFF" + bytes(100), "audio/wav")
+    family.deps.store.patch_call(intro.id, recording_key="recordings/y.wav")
+    url = f"/api/family/recordings/{intro.id}"
+    tail = family.get(url, headers={"Range": "bytes=100-"})
+    assert tail.status_code == 206 and tail.headers["content-range"] == "bytes 100-103/104" and len(tail.content) == 4
+    long = family.get(url, headers={"Range": "bytes=0-99999"})
+    assert long.status_code == 206 and long.headers["content-range"] == "bytes 0-103/104"
+    beyond = family.get(url, headers={"Range": "bytes=500-"})
+    assert beyond.status_code == 200 and len(beyond.content) == 104
+
+
+def test_the_persons_introduction_asked_again_is_a_new_one_each_time(family):
+    pid = enrol(family)
+    for _ in range(3):  # three unanswered tries close the first introduction
+        (pending,) = [c for c in real_calls(family.sys) if c.status == "queued"]
+        complete(family.sys, pending, Answer.NO_ANSWER)
+    intros = set()
+    for _ in range(2):
+        family.sys.clock.advance(24 * 3600)  # a day later each time, so the daily limit of calls is not in the way
+        assert family.post(f"/api/family/persons/{pid}/intro").status_code == 202
+        intros |= {e.id for e in family.deps.store.list_episodes(pid) if e.kind == EpisodeKind.INTRO}
+        for _ in range(3):
+            (pending,) = [c for c in real_calls(family.sys) if c.status == "queued"]
+            complete(family.sys, pending, Answer.NO_ANSWER)
+    assert len(intros) == 3  # the first, and one for each time it was asked again

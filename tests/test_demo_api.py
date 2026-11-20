@@ -5,7 +5,7 @@ from factories import TODAY
 from fastapi.testclient import TestClient
 from helpers import build_sys
 
-from kuckuc.models import Answer, EpisodeKind, PersonStatus, Target
+from kuckuc.models import Answer, EpisodeKind, EpisodeState, PersonStatus, Target
 
 PHONE = "(415) 555-0100"
 E164 = "+14155550100"
@@ -286,3 +286,43 @@ def test_a_demo_too_busy_to_count_says_so_and_asks_to_try_again(web):
     web.deps.store.reserve_demo = lambda *args, **kwargs: "busy"
     r = web.post("/api/demo/run", json={"token": token, "scenario": "heat"})
     assert r.status_code == 503 and r.json()["code"] == "busy"
+
+
+
+def test_a_demo_episode_counts_as_finished_only_once_its_last_row_is_written(web):
+    # The episode is saved as closed a moment before its closing rows; the page stopped too early.
+    from factories import make_episode
+
+    token = verified_token(web)
+    session = web.deps.store.get_demo_session_by_token(token)
+    web.deps.store.create_episode(make_episode(id="demo-x", kind=EpisodeKind.DEMO, state=EpisodeState.CLOSED,
+                                               person_id=f"demo-{session.id}", demo_session_id=session.id))  # fmt: skip
+    first = web.get("/api/demo/timeline/demo-x", params={"token": token, "after": 0}).json()
+    assert first["closed"] is False
+    web.deps.store.add_timeline("demo-x", "episode_closed", {"result": "ok"})
+    assert web.get("/api/demo/timeline/demo-x", params={"token": token, "after": 0}).json()["closed"] is True
+
+
+def test_checking_codes_is_limited_per_address(web):
+    # Every check is a request to Twilio; a script could loop it without end.
+    from kuckuc.web.demo import VERIFY_CHECKS_PER_IP
+
+    web.post("/api/demo/verify/start", json={"phone": PHONE, "channel": "sms"})
+    for _ in range(VERIFY_CHECKS_PER_IP):
+        web.post("/api/demo/verify/check", json={"phone": PHONE, "code": "000000"})
+    r = web.post("/api/demo/verify/check", json={"phone": PHONE, "code": "123456"})
+    assert r.status_code == 429 and r.json()["code"] == "ip_limit"
+
+
+
+def test_a_demo_episode_closed_long_ago_without_its_closing_row_counts_as_finished(web):
+    from datetime import timedelta
+
+    from factories import make_episode
+
+    token = verified_token(web)
+    session = web.deps.store.get_demo_session_by_token(token)
+    web.deps.store.create_episode(make_episode(id="demo-y", kind=EpisodeKind.DEMO, state=EpisodeState.CLOSED,
+                                               person_id=f"demo-{session.id}", demo_session_id=session.id,
+                                               updated_at=web.deps.clock.now() - timedelta(minutes=3)))  # fmt: skip
+    assert web.get("/api/demo/timeline/demo-y", params={"token": token, "after": 0}).json()["closed"] is True

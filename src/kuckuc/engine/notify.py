@@ -57,6 +57,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "intro_blocked": "{name}: uvodni poziv nije obavljen. Pokreni ga ponovo sa svoje stranice.",
         "lost_track": "HITNO: provera za {name} je zastala. Ne znamo kako je {name}. Pozovi nekoga ko je blizu.",
+        "lost_track_unwell": (
+            "HITNO: {name} kaže da nije dobro, a provera je zastala. Ne znamo da li je neko otišao do nje. "
+            "Pozovi odmah nekoga ko je blizu ili hitnu pomoć 194."
+        ),
         "intro_lost": "{name}: uvodni poziv nije završen. Pokreni ga ponovo sa svoje stranice.",
         "call_refused": (
             "HITNO, {name}: poziv nije mogao ni da krene, jer je telefonska mreža odbila broj. "
@@ -102,6 +106,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "intro_blocked": "{name}: the introduction call was not made. Start it again from your page.",
         "lost_track": "URGENT: the check on {name} stalled. We do not know how {name} is. Call someone nearby.",
+        "lost_track_unwell": (
+            "URGENT: {name} says they are not well, and the check stalled. We do not know whether anyone went to look. "
+            "Call someone nearby or the emergency number now."
+        ),
         "intro_lost": "{name}: the introduction call did not finish. Start it again from your page.",
         "call_refused": (
             "URGENT, {name}: the call could not even start: the phone network refused the number. "
