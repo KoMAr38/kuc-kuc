@@ -184,3 +184,38 @@ def test_a_heads_up_stalled_while_calling_her_is_reported_quietly(sys):
     sys.clock.advance(46 * 60)
     assert run_watchdog(sys.deps) == ["h3"]
     assert notices(sys)[-1] == ("headsup_blocked", False)
+
+
+def test_a_closed_checks_money_is_settled_at_what_its_calls_cost_and_only_once(sys):
+    from kuckuc.budget import line_price_usd
+    from kuckuc.jobs.watchdog import settle_budgets
+
+    ep_id = request_check(sys)
+    held = sys.deps.store.get_budget("own:month:2026-11")["reserved"]
+    assert held > 0 and settle_budgets(sys.deps) == []  # still running: its money stays held
+    call = only_new_call(sys)
+    complete(sys, call, Answer.OK)
+    assert sys.deps.store.get_episode(ep_id).state == EpisodeState.CLOSED
+    assert settle_budgets(sys.deps) == [ep_id]
+    price = line_price_usd(call.to, sys.deps.settings.call_price_per_min_usd)
+    assert sys.deps.store.get_budget("own:month:2026-11") == {"reserved": 0.0, "spent": round(price, 4)}
+    assert settle_budgets(sys.deps) == []
+
+
+def test_one_budget_that_cannot_be_settled_never_stops_the_others(sys):
+    from kuckuc.jobs.watchdog import settle_budgets
+
+    first = request_check(sys)
+    complete(sys, only_new_call(sys), Answer.OK)
+    settle = sys.deps.store.settle_budget
+
+    def fails_for_first(episode_id, spent):
+        if episode_id == first:
+            raise RuntimeError("database hiccup")
+        return settle(episode_id, spent)
+
+    sys.deps.store.settle_budget = fails_for_first
+    sys.clock.advance(3600)
+    second = request_check(sys)
+    complete(sys, only_new_call(sys), Answer.OK)
+    assert settle_budgets(sys.deps) == [second]

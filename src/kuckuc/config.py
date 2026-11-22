@@ -37,9 +37,11 @@ class Settings(BaseSettings):
     gemini_thinking_level: str = "LOW"
     tts_voice_sr: str = "sr-RS-Chirp3-HD-Leda"  # chosen by the family from three samples
     tts_voice_en: str = "en-US-Chirp3-HD-Aoede"
+    tts_voice_de: str = "de-DE-Chirp3-HD-Leda"  # the voice the family chose for Serbian; also for Austria and Switzerland
     tts_endpoint: str = "eu-texttospeech.googleapis.com"
     tts_rate_sr: float = 0.9  # a little slower than normal, for an older listener on a landline
     tts_rate_en: float = 1.0
+    tts_rate_de: float = 0.9
 
     # Family sign-in and enrolment.
     invite_codes: Annotated[tuple[str, ...], NoDecode] = ()
@@ -79,6 +81,13 @@ class Settings(BaseSettings):
     # Twilio list prices read on 2026-11-13, per minute to a mobile, calling from a US number.
     # GB is the surcharged rate that applies to calls arriving from outside Europe.
     demo_price_per_min_usd: dict[str, float] = {"US": 0.014, "CA": 0.014, "GB": 0.473, "NO": 0.077}
+    # What a minute of a real call costs, for the call budgets: Twilio list prices calling from a US number,
+    # read on 13 and 22 Nov 2026. Keys are "<country>:<fixed|mobile>" or "<country>". A number not listed
+    # here counts at the dearest price listed, so a budget is never spent faster than it says.
+    call_price_per_min_usd: dict[str, float] = {
+        "RS:fixed": 0.597, "RS:mobile": 0.821, "DE:mobile": 0.376, "GB:mobile": 0.473,
+        "NO:mobile": 0.077, "US": 0.014, "CA": 0.014,
+    }  # fmt: skip
     verify_fee_usd: float = 0.06  # $0.05 per successful verification plus the text message
     demo_retry_s: int = 30
     demo_followup_s: int = 45

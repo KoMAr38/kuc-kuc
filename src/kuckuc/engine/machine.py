@@ -92,6 +92,13 @@ def step(ep: Episode, ev: Input, neighbor_count: int) -> tuple[Episode, list[Act
     if isinstance(ev, CallBlocked):
         if ev.reason == "refused":
             return _refused(ep, neighbor_count)
+        if ev.reason in ("budget", "no_budget", "off_season") and ep.kind not in (
+            EpisodeKind.INTRO,
+            EpisodeKind.INTRO_NEIGHBOR,
+        ):
+            # No money for this payer's calls: nobody is being called, so the family must check now.
+            key = "budget_off_season" if ev.reason == "off_season" else "budget_paused"
+            return _close(ep, Result.BLOCKED, [Notify(key, urgent=True)])
         if ep.kind in (EpisodeKind.INTRO, EpisodeKind.INTRO_NEIGHBOR):
             # Nobody is waiting for help on an introduction: the family starts it again when they can.
             return _close(ep, Result.BLOCKED, [Notify("intro_blocked", urgent=False)])

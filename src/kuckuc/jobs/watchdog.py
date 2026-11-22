@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
+from kuckuc.budget import spent_usd
 from kuckuc.deps import Deps
 from kuckuc.models import Episode, EpisodeKind, EpisodeState, Result
 
@@ -76,6 +77,24 @@ def run_watchdog(deps: Deps) -> list[str]:
     return closed
 
 
+def settle_budgets(deps: Deps) -> list[str]:
+    """Every closed check gives back the money it held and is charged what its calls cost. Returns the
+    episode ids settled. A check still running keeps its money held, so it can always finish."""
+    settled = []
+    for hold in deps.store.list_open_holds():
+        try:
+            ep = deps.store.get_episode(hold.episode_id)
+            if ep is not None and ep.state != EpisodeState.CLOSED:
+                continue
+            calls = deps.store.list_calls_for_episode(hold.episode_id)
+            if deps.store.settle_budget(hold.episode_id, spent_usd(calls, deps.settings.call_price_per_min_usd)):
+                settled.append(hold.episode_id)
+        except Exception:
+            log.exception("budget of episode %s not settled now; the next run tries again", hold.episode_id)
+    log.info("watchdog: %d budgets settled", len(settled))
+    return settled
+
+
 def _tell_family(deps: Deps, ep: Episode) -> None:
     person = deps.store.get_person(ep.person_id)
     if person is None:
@@ -105,7 +124,9 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO)
     # The engine's dependencies: the watchdog tells the family through the same Telegram bot.
-    run_watchdog(build_cloud_deps(Settings(), "engine"))
+    deps = build_cloud_deps(Settings(), "engine")
+    run_watchdog(deps)
+    settle_budgets(deps)  # after closing stopped checks, so their money comes back in the same run
     return 0
 
 

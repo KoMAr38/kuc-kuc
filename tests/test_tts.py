@@ -58,3 +58,15 @@ def test_fake_tts_records_what_it_was_asked_to_say():
     k2 = fake.audio_key("Hello", "en")
     assert k1 != k2 and k1.startswith("audio/") and k1.endswith(".mp3")
     assert fake.spoken == [("Dobar dan", "sr"), ("Hello", "en")]
+
+
+def test_every_call_language_has_a_voice():
+    from typing import get_args
+
+    from kuckuc.config import Settings
+    from kuckuc.deps import tts_voices
+    from kuckuc.models import Lang
+
+    voices = tts_voices(Settings())
+    assert set(voices) == set(get_args(Lang))
+    assert voices["de"] == "de-DE-Chirp3-HD-Leda@0.9"

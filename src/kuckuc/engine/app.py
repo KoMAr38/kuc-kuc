@@ -20,6 +20,7 @@ from fastapi import Body, FastAPI, Response
 from pydantic import ValidationError
 
 from kuckuc.deps import Deps
+from kuckuc.emergency import emergency_number
 from kuckuc.ports import StepInProgress
 from kuckuc.engine.guards import call_block_reason
 from kuckuc.engine.machine import (
@@ -36,13 +37,16 @@ from kuckuc.engine.machine import (
     step,
 )
 from kuckuc.engine.schedule import daytime_start, plan_calls
+from kuckuc.budget import budget_caps, off_season, worst_case_usd
 from kuckuc.models import (
     Answer,
+    BudgetHold,
     CallRecord,
     Episode,
     EpisodeKind,
     EpisodeState,
     Neighbor,
+    Payer,
     Person,
     PersonStatus,
     Result,
@@ -64,7 +68,9 @@ PENDING_GRACE_S = 90
 LATE_STEP_S = 30 * 60
 # Demo visitors and simulated people have no neighbour on file: they play the neighbour themselves.
 _SELF_NEIGHBORS = (EpisodeKind.DEMO, EpisodeKind.SIM)
-_AS_NEIGHBOR = {"sr": "vaš komšija", "en": "your neighbour"}
+# Only demo and simulated checks call the person as their own neighbour, and those are in English; the
+# German words are here so that every call language has them.
+_AS_NEIGHBOR = {"sr": "vaš komšija", "en": "your neighbour", "de": "Ihr Nachbar"}
 
 
 def create_engine_app(deps: Deps) -> FastAPI:
@@ -451,7 +457,12 @@ def _place_call(deps: Deps, ep: Episode, person: Person, action: PlaceCall, n: i
         return _queue_again(deps, ep, person, action, existing)
     role = action.target.value
     words = ScriptParams(
-        name=person.name, family=person.family_name, gender=person.gender, hazard=ep.hazard, value=ep.value
+        name=person.name,
+        family=person.family_name,
+        gender=person.gender,
+        hazard=ep.hazard,
+        value=ep.value,
+        emergency=emergency_number(person.phone) or "",
     )
     to, neighbor_id = person.phone, None
     if action.target == Target.PERSON and ep.kind not in _SELF_NEIGHBORS:
@@ -468,6 +479,8 @@ def _place_call(deps: Deps, ep: Episode, person: Person, action: PlaceCall, n: i
             words = replace(words, neighbor=neighbor.name)
 
     reason = call_block_reason(deps, person, action.target, first_try=ep.person_attempts <= 1)
+    if reason is None and _first_call(ep, action) and not (person.demo or person.sim):
+        reason = _hold_budget(deps, ep, person)
     if reason:
         _blocked(deps, ep, role, reason)
         return False
@@ -527,6 +540,62 @@ def _sim_answer(ep: Episode) -> str:
     return ep.sim_answers[index] if 0 <= index < len(ep.sim_answers) else Answer.UNCLEAR.value
 
 
+class BudgetBusy(RuntimeError):
+    """The budget could not be read and written in time. The event is delivered again later; a check is
+    never blocked because the database was busy."""
+
+
+def _first_call(ep: Episode, action: PlaceCall) -> bool:
+    """The call that starts a check. Only it holds money: every later call of the check is already
+    covered, so an escalation that has started always finishes."""
+    if ep.kind == EpisodeKind.INTRO_NEIGHBOR:
+        return ep.neighbor_attempts <= 1
+    return action.target == Target.PERSON and ep.person_attempts <= 1
+
+
+def _hold_budget(deps: Deps, ep: Episode, person: Person) -> str | None:
+    """Holds the check's worst case in its payer's budgets. None when held; otherwise why not."""
+    if deps.store.get_hold(ep.id) is not None:
+        return None  # this check holds its money already: the same first call, carried out again
+    payer = deps.store.get_payer(person.payer_id)
+    now = deps.clock.now()
+    caps = budget_caps(payer, now) if payer is not None else []
+    if not caps:
+        refusal: str | None = "off_season" if payer is not None and off_season(payer, now) else "no_budget"
+    else:
+        if ep.kind == EpisodeKind.INTRO_NEIGHBOR:
+            ids = [ep.neighbor_id] if ep.neighbor_id else []
+        else:
+            ids = ep.neighbor_ids if ep.neighbor_ids is not None else [
+                n.id for n in deps.store.list_neighbors(person.id) if n.status == PersonStatus.ACTIVE
+            ]
+        phones = [n.phone for n in (deps.store.get_neighbor(i) for i in ids) if n is not None]
+        usd = worst_case_usd(ep.kind, person.phone, phones, deps.settings.call_price_per_min_usd)
+        hold = BudgetHold(episode_id=ep.id, payer_id=person.payer_id, keys=[], usd=round(usd, 4), created_at=now)
+        refusal = deps.store.reserve_budget(hold, caps)
+    if refusal == "busy":
+        raise BudgetBusy(f"episode {ep.id}: the budget of {person.payer_id} is busy")
+    if refusal in ("budget", "no_budget") and payer is not None:
+        _tell_staff(deps, payer)  # outside its season the staff know: their contract says so
+    return refusal
+
+
+def _tell_staff(deps: Deps, payer: Payer) -> None:
+    """The payer's staff hear once a day that its money has run out; the families hear about every check."""
+    day = deps.clock.now().astimezone(ZoneInfo(payer.tz)).date()
+    key = f"budget_paused:{payer.id}:{day.isoformat()}"
+    if not payer.staff_uids or not deps.store.claim_once(key):
+        return
+    reached = False
+    for uid in payer.staff_uids:
+        try:
+            reached = deps.notifier.send(uid, "budget_paused_staff", {"payer": payer.name}, True) or reached
+        except Exception:
+            log.exception("payer %s: the staff message about the budget did not go out", payer.id)
+    if not reached:
+        deps.store.release_claim(key)  # nobody heard it: the next refused check tries again
+
+
 def _blocked(deps: Deps, ep: Episode, role: str, reason: str) -> None:
     deps.store.add_timeline(ep.id, "call_blocked", {"role": role, "reason": reason})
     deps.bus.publish("call.blocked", {"episode_id": ep.id, "reason": reason})
@@ -536,7 +605,12 @@ def _blocked(deps: Deps, ep: Episode, role: str, reason: str) -> None:
 def _notify(deps: Deps, ep: Episode, person: Person, action: Notify) -> None:
     neighbor = _current_neighbor(deps, ep)
     about = neighbor.name if ep.kind == EpisodeKind.INTRO_NEIGHBOR and neighbor else person.name
-    params = {"name": about, "neighbor": neighbor.name if neighbor else "", "hazard": ep.hazard or ""}
+    params = {
+        "name": about,
+        "neighbor": neighbor.name if neighbor else "",
+        "hazard": ep.hazard or "",
+        "emergency": emergency_number(person.phone) or "",
+    }
     delivered = deps.notifier.send(person.owner_uid, action.key, params, action.urgent)
     # The family's page must not say "notified" about a message that never arrived. The demo shows
     # what a family would be told, so there the row stays.

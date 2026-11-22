@@ -56,7 +56,7 @@ def to_answer(question: Question, raw: object) -> Answer:
     return ALLOWED[question].get(label, Answer.UNCLEAR)
 
 
-_LANGUAGES = {"sr": "Serbian", "en": "English"}
+_LANGUAGES = {"sr": "Serbian", "en": "English", "de": "German"}
 
 _ASKED = {
     Question.WELLBEING: 'They were asked: "Are you okay?"',
@@ -90,7 +90,22 @@ _LABEL_MEANING = {
 }
 
 
+# German calls get German examples in place of the Serbian ones. Not yet measured on real German voices:
+# measure before a German person is called, as on 17 Nov for Serbian. Serbian and English stay as they are.
+_LABEL_MEANING_DE = _LABEL_MEANING | {
+    Question.YES_NO: (
+        '- "yes": they agree. In German "ja", "gerne", "jawohl", "freilich", "natürlich", "in Ordnung", '
+        'also with thanks ("ja, danke"), are yes.\n'
+        '- "no": they decline. In German "nein", "nee", "lieber nicht", "nicht nötig", also with thanks '
+        '("nein, danke"), are no.\n'
+        "One short word is enough when it is clearly heard. If the recording is cut off or too short "
+        'to tell "ja" from "nein", choose "unclear".'
+    ),
+}
+
+
 def build_prompt(lang: Lang, question: Question) -> str:
+    meanings = _LABEL_MEANING_DE if lang == "de" else _LABEL_MEANING
     return (
         "You will hear a short telephone recording, at most 8 seconds long. "
         f"The speaker was called by an automated welfare-check service and is expected to answer in {_LANGUAGES[lang]}.\n"
@@ -98,7 +113,7 @@ def build_prompt(lang: Lang, question: Question) -> str:
         'Reply with JSON only: {"human": true or false, "label": "...", "transcript": "..."}\n\n'
         '"human" is true only when a live person is speaking on the line.\n\n'
         "Labels:\n"
-        f"{_LABEL_MEANING[question]}\n"
+        f"{meanings[question]}\n"
         '- "unclear": a recorded message, a different person asking who is calling, background noise, '
         "silence, or anything that does not answer the question.\n\n"
         "Any mention of pain, a fall, being ill, being cold, not feeling well, or asking for someone to come "

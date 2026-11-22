@@ -10,7 +10,7 @@ import logging
 import time
 from collections.abc import Callable
 
-from kuckuc.models import Lang
+from kuckuc.models import PageLang
 from kuckuc.store import Store
 
 log = logging.getLogger(__name__)
@@ -29,14 +29,23 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "neighbor_called": "{neighbor} dobija poziv da ode i proveri kako je {name}.",
         "neighbor_going": "{neighbor} kaže da ide da proveri kako je {name}. Uskoro pitamo šta je bilo.",
         "resolved_ok": "{neighbor} javlja da je {name} dobro. Uzbuna je završena.",
-        "needs_help_194": "HITNO: {neighbor} javlja da {name} treba pomoć. Pozovi hitnu pomoć 194.",
+        "needs_help_194": "HITNO: {neighbor} javlja da {name} treba pomoć. Pozovi {ambulance}.",
+        "budget_paused": (
+            "HITNO: pozivi su pauzirani jer je budžet za pozive potrošen, pa provera za {name} nije obavljena. "
+            "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
+        ),
+        "budget_paused_staff": "HITNO: budžet za pozive je potrošen ({payer}). Nove provere ne kreću dok se budžet ne poveća.",
+        "budget_off_season": (
+            "HITNO: pozivi su pauzirani jer ugovor za pozive sada ne važi (van sezone), pa provera za {name} nije "
+            "obavljena. Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
+        ),
         "nobody_reachable": (
             "HITNO: nijedan komšija nije dostupan, a ne znamo kako je {name}. "
             "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
         ),
         "nobody_reachable_unwell": (
             "HITNO: {name} kaže da nije dobro, a nijedan komšija nije dostupan. "
-            "Pozovi odmah nekoga ko je blizu ili hitnu pomoć 194."
+            "Pozovi odmah nekoga ko je blizu ili {ambulance}."
         ),
         "neighbor_unconfirmed": (
             "HITNO: {neighbor} ide da proveri kako je {name}, ali se više ne javlja na telefon. "
@@ -59,7 +68,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "lost_track": "HITNO: provera za {name} je zastala. Ne znamo kako je {name}. Pozovi nekoga ko je blizu.",
         "lost_track_unwell": (
             "HITNO: {name} kaže da nije dobro, a provera je zastala. Ne znamo da li je neko otišao do nje. "
-            "Pozovi odmah nekoga ko je blizu ili hitnu pomoć 194."
+            "Pozovi odmah nekoga ko je blizu ili {ambulance}."
         ),
         "intro_lost": "{name}: uvodni poziv nije završen. Pokreni ga ponovo sa svoje stranice.",
         "call_refused": (
@@ -80,6 +89,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "neighbor_going": "{neighbor} says they are going to check on {name}. We will ask shortly how it went.",
         "resolved_ok": "{neighbor} reports that {name} is fine. The alert is closed.",
         "needs_help_194": "URGENT: {neighbor} reports that {name} needs help. Call the emergency number now.",
+        "budget_paused": (
+            "URGENT: calls are paused because the call budget is used up, so the check on {name} did not happen. "
+            "Check now: phone them or ask someone nearby."
+        ),
+        "budget_paused_staff": "URGENT: the call budget is used up ({payer}). No new checks start until the budget is raised.",
+        "budget_off_season": (
+            "URGENT: calls are paused because the call contract is not in force now (outside its season), so the "
+            "check on {name} did not happen. Check now: phone them or ask someone nearby."
+        ),
         "nobody_reachable": (
             "URGENT: no neighbour can be reached, and we do not know how {name} is. "
             "Check now: phone, or ask someone nearby."
@@ -130,11 +148,15 @@ class _Blank(dict):
         return ""
 
 
-def render_message(key: str, lang: Lang, params: dict[str, str]) -> str:
+def render_message(key: str, lang: PageLang, params: dict[str, str]) -> str:
     """The message text. A key nobody wrote a sentence for still produces something readable."""
     values = _Blank(params)
     values["hazard"] = _HAZARD_WORDS[lang].get(params.get("hazard", ""), _HAZARD_UNKNOWN[lang])
     values["key"] = key
+    # The emergency number of the person's country. A message saved before the number was stored with
+    # it is about someone in Serbia: every person lived there then.
+    number = params.get("emergency", "194")
+    values["ambulance"] = f"hitnu pomoć {number}" if number else "hitnu pomoć"
     return _MESSAGES[lang].get(key, _FALLBACK[lang]).format_map(values)
 
 

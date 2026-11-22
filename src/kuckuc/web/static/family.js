@@ -16,6 +16,14 @@
     sign_out: { sr: "Odjavi se", en: "Sign out" },
     signed_in_as: { sr: "Prijavljen:", en: "Signed in as" },
     telegram_title: { sr: "Obaveštenja", en: "Notifications" },
+    budget_title: { sr: "Novac za pozive", en: "Money for calls" },
+    budget_hint: {
+      sr: "Provera dok traje drži najveći mogući trošak, a kad se završi, naplaćuje se ono što su pozivi stvarno koštali.",
+      en: "A check holds its largest possible cost while it runs and is charged what its calls cost once it ends.",
+    },
+    budget_month: { sr: "{payer} · mesec {label} · potrošeno ${spent} · u toku ${held} · ukupno ${cap}", en: "{payer} · month {label} · spent ${spent} · held ${held} · cap ${cap}" },
+    budget_season: { sr: "{payer} · sezona {label} · potrošeno ${spent} · u toku ${held} · ukupno ${cap}", en: "{payer} · season {label} · spent ${spent} · held ${held} · cap ${cap}" },
+    budget_out: { sr: " — nove provere ne kreću", en: " — no new checks start" },
     telegram_connect: { sr: "Poveži Telegram", en: "Connect Telegram" },
     telegram_hint: { sr: "Otvoriće se Telegram; pritisni Start. Poruke o pozivima stižu tamo.", en: "Telegram opens; press Start. Messages about the calls arrive there." },
     telegram_linked: { sr: "Telegram je povezan. Poruke o pozivima stižu tamo.", en: "Telegram is connected. Messages about the calls arrive there." },
@@ -561,6 +569,25 @@
     }
   }
 
+  // Only the staff of whoever pays for the calls see this: what its calls have cost against each cap.
+  function renderBudgets(me) {
+    var budgets = me.budgets || [];
+    $("budget-card").hidden = !budgets.length;
+    var list = $("budget-list");
+    list.textContent = "";
+    budgets.forEach(function (b) {
+      var used = b.spent_usd + b.reserved_usd;
+      var text = t(b.period === "season" ? "budget_season" : "budget_month", {
+        payer: b.payer,
+        label: b.label,
+        spent: b.spent_usd.toFixed(2),
+        held: b.reserved_usd.toFixed(2),
+        cap: b.cap_usd.toFixed(2),
+      });
+      list.appendChild(el("li", used >= b.cap_usd * 0.999 ? "budget-out" : "", text + (used >= b.cap_usd * 0.999 ? t("budget_out") : "")));
+    });
+  }
+
   function render() {
     var me = state.me;
     $("signed-out").hidden = !!me;
@@ -571,6 +598,7 @@
     }
     $("me-email").textContent = me.email;
     renderTelegram(me);
+    renderBudgets(me);
     var people = $("people");
     people.textContent = "";
     if (!me.persons.length) {

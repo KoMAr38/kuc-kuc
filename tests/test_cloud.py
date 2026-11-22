@@ -201,6 +201,8 @@ def test_the_watchdog_runs_with_the_engines_queue_and_messages(monkeypatch):
 
     roles = []
     monkeypatch.setattr(kuckuc.deps, "build_cloud_deps", lambda settings, role: roles.append(role) or object())
-    monkeypatch.setattr(watchdog, "run_watchdog", lambda deps: [])
+    ran = []
+    monkeypatch.setattr(watchdog, "run_watchdog", lambda deps: ran.append("close") or [])
+    monkeypatch.setattr(watchdog, "settle_budgets", lambda deps: ran.append("settle") or [])
     watchdog.main()
-    assert roles == ["engine"]
+    assert roles == ["engine"] and ran == ["close", "settle"]  # money of checks it closed comes back at once

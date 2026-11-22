@@ -56,6 +56,7 @@ def test_person_call_carries_what_the_script_needs(sys):
         "hazard": "cold",
         "value": "-12.4",
         "has_neighbor": "True",
+        "emergency": "911",  # the test phone is a US number
     }
 
 
@@ -848,3 +849,145 @@ def test_a_call_another_run_created_a_moment_ago_is_neither_created_nor_queued_a
     handle_event(sys.deps, "m-1", "call.completed", completion(call, Answer.NEEDS_HELP))
     assert [t for t in sys.deps.queue.tasks if t.kind == "call"] == []
     assert "neighbor_called" not in sent_keys(sys)
+
+
+def test_a_call_and_an_urgent_message_name_the_emergency_number_of_the_persons_country(sys):
+    sys.deps.store.put_person(make_person(phone="+49000000"))  # speaks Serbian, lives in Germany
+    request_check(sys)
+    call = only_new_call(sys)
+    assert call.params["emergency"] == "112"
+    complete(sys, call, Answer.NEEDS_HELP)
+    unwell = [n for n in sys.deps.notifier.sent if n.key == "call_unwell"]
+    assert unwell and unwell[-1].params["emergency"] == "112"
+
+
+def test_serbian_urgent_messages_name_the_number_they_were_given():
+    p = {"name": "baba Milena", "neighbor": "Dragan"}
+    assert render_message("needs_help_194", "sr", p | {"emergency": "112"}) == (
+        "HITNO: Dragan javlja da baba Milena treba pomoć. Pozovi hitnu pomoć 112."
+    )
+    assert render_message("needs_help_194", "sr", p | {"emergency": ""}).endswith("Pozovi hitnu pomoć.")
+    assert render_message("nobody_reachable_unwell", "sr", p | {"emergency": "112"}).endswith(
+        "Pozovi odmah nekoga ko je blizu ili hitnu pomoć 112."
+    )
+    # A message saved before the number was stored with it: every person then lived in Serbia.
+    assert render_message("needs_help_194", "sr", p).endswith("Pozovi hitnu pomoć 194.")
+
+
+# --- call budgets --------------------------------------------------------------------------------
+
+
+def _payer(sys, **over):
+    from kuckuc.models import Payer
+
+    payer = Payer(id="own", name="Kuc-kuc", month_cap_usd=100.0, tz="Europe/Belgrade").model_copy(update=over)
+    sys.deps.store.put_payer(payer)
+    return payer
+
+
+def test_a_check_holds_its_worst_case_before_its_first_call_and_only_then(sys):
+    from kuckuc.budget import worst_case_usd
+
+    _payer(sys)
+    ep_id = request_check(sys)
+    (hold,) = sys.deps.store.list_open_holds()
+    phones = [n.phone for n in sys.deps.store.list_neighbors("p1")]
+    expected = worst_case_usd(EpisodeKind.MANUAL, make_person().phone, phones, sys.deps.settings.call_price_per_min_usd)
+    assert (hold.episode_id, hold.payer_id, hold.usd) == (ep_id, "own", round(expected, 4))
+    assert sys.deps.store.get_budget("own:month:2026-11")["reserved"] == round(expected, 4)
+
+
+def test_a_started_check_finishes_even_when_the_money_has_run_out_since(sys):
+    _payer(sys)
+    request_check(sys)
+    call = only_new_call(sys)
+    _payer(sys, month_cap_usd=0.0)  # the budget was cut while she was being called
+    complete(sys, call, Answer.NEEDS_HELP)
+    assert [c.target for c in real_calls(sys)][-1] == Target.NEIGHBOR  # the neighbour is still called
+    assert "budget_paused" not in sent_keys(sys)
+
+
+def test_a_check_that_does_not_fit_the_budget_never_rings_and_the_family_is_told(sys):
+    _payer(sys, month_cap_usd=0.05, staff_uids=["staff-1"])  # the test numbers are American: $0.014 a minute
+    ep_id = request_check(sys)
+    assert real_calls(sys) == []
+    assert sys.deps.store.get_episode(ep_id).result == Result.BLOCKED
+    sent = [(n.owner_uid, n.key, n.urgent) for n in sys.deps.notifier.sent]
+    assert ("u1", "budget_paused", True) in sent and ("staff-1", "budget_paused_staff", True) in sent
+    request_check(sys)  # a second one the same day: the family is told again, the staff only once
+    keys = [(n.owner_uid, n.key) for n in sys.deps.notifier.sent]
+    assert keys.count(("u1", "budget_paused")) == 2 and keys.count(("staff-1", "budget_paused_staff")) == 1
+
+
+def test_a_person_whose_payer_has_no_budget_is_never_called(sys):
+    sys.deps.store.put_person(make_person(payer_id="nobody"))
+    request_check(sys)
+    assert real_calls(sys) == [] and "budget_paused" in sent_keys(sys)
+
+
+def test_a_busy_budget_sends_the_event_back_instead_of_blocking_the_check(sys):
+    _payer(sys)
+    sys.deps.store.reserve_budget = lambda hold, caps: "busy"
+    with pytest.raises(RuntimeError):  # the event is delivered again later
+        handle_event(sys.deps, "m-busy", "check.requested", {"person_id": "p1", "kind": "manual"})
+    assert real_calls(sys) == [] and "budget_paused" not in sent_keys(sys)
+
+
+def test_budget_messages_in_both_languages():
+    p = {"name": "baba Milena", "payer": "Org"}
+    assert render_message("budget_paused", "sr", p) == (
+        "HITNO: pozivi su pauzirani jer je budžet za pozive potrošen, pa provera za baba Milena nije obavljena. "
+        "Proveri odmah: pozovi telefonom ili zamoli nekoga ko je blizu."
+    )
+    assert render_message("budget_paused_staff", "en", p) == (
+        "URGENT: the call budget is used up (Org). No new checks start until the budget is raised."
+    )
+    assert render_message("budget_paused", "en", p).startswith("URGENT: ")
+    assert render_message("budget_paused_staff", "sr", p).startswith("HITNO: ")
+
+
+def test_staff_who_were_not_reached_are_tried_again_on_the_next_refused_check(sys):
+    _payer(sys, month_cap_usd=0.05, staff_uids=["staff-1"])
+    send, tries = sys.deps.notifier.send, []
+
+    def telegram_down_once(uid, key, params, urgent):
+        if key == "budget_paused_staff":
+            tries.append(uid)
+            if len(tries) == 1:
+                return False
+        return send(uid, key, params, urgent)
+
+    sys.deps.notifier.send = telegram_down_once
+    request_check(sys)
+    request_check(sys)
+    request_check(sys)
+    assert tries == ["staff-1", "staff-1"]  # not reached the first time, reached the second, then quiet
+
+
+def test_outside_its_season_a_payers_check_does_not_start_and_staff_are_not_told_to_raise_money(sys):
+    from datetime import date
+
+    _payer(sys, month_cap_usd=None, season_cap_usd=500.0, season_start=date(2027, 6, 1),
+           season_end=date(2027, 9, 30), staff_uids=["staff-1"])  # fmt: skip
+    request_check(sys)
+    assert real_calls(sys) == []
+    keys = [(n.owner_uid, n.key) for n in sys.deps.notifier.sent]
+    assert ("u1", "budget_off_season") in keys and not any(uid == "staff-1" for uid, _ in keys)
+
+
+def test_a_check_that_holds_its_money_is_never_refused_when_its_first_call_is_carried_out_again(sys):
+    from datetime import date
+
+    from kuckuc.engine.app import _hold_budget
+
+    _payer(sys)
+    ep_id = request_check(sys)
+    # The season ends between the first try and the step being carried out again (a minute later).
+    _payer(sys, month_cap_usd=None, season_cap_usd=5.0, season_start=date(2026, 6, 1), season_end=date(2026, 9, 30))
+    assert _hold_budget(sys.deps, sys.deps.store.get_episode(ep_id), sys.deps.store.get_person("p1")) is None
+
+
+def test_off_season_messages_in_both_languages():
+    p = {"name": "baba Milena"}
+    assert render_message("budget_off_season", "sr", p).startswith("HITNO: pozivi su pauzirani jer ugovor za pozive")
+    assert render_message("budget_off_season", "en", p).startswith("URGENT: calls are paused because the call contract")

@@ -918,3 +918,40 @@ def test_the_persons_introduction_asked_again_is_a_new_one_each_time(family):
             (pending,) = [c for c in real_calls(family.sys) if c.status == "queued"]
             complete(family.sys, pending, Answer.NO_ANSWER)
     assert len(intros) == 3  # the first, and one for each time it was asked again
+
+
+def test_a_person_can_be_called_in_german_while_the_page_stays_in_serbian_or_english(family):
+    pid = enrol(family, name="Frau Weber", family_name="Ihr Enkel Peter", lang="de")
+    assert family.deps.store.get_person(pid).lang == "de"
+    (intro,) = [c for c in real_calls(family.sys) if c.script == ScriptKind.INTRO_PERSON]
+    assert intro.lang == "de"
+    assert family.post("/api/family/lang", json={"lang": "de"}).status_code == 422
+
+
+
+def test_the_invite_code_decides_who_pays_for_the_calls(family):
+    from kuckuc.models import Payer
+
+    family.deps.store.put_payer(Payer(id="org-1", name="Org", month_cap_usd=50, invite_code="ORG-CODE"))
+    own = enrol(family)
+    theirs = enrol(family, invite_code="ORG-CODE", phone="+14155550107")
+    assert family.deps.store.get_person(own).payer_id == "own"
+    assert family.deps.store.get_person(theirs).payer_id == "org-1"
+    assert family.post("/api/family/persons", json=enrol_body(invite_code="NOT-A-CODE")).status_code == 403
+
+
+def test_only_a_payers_staff_see_what_its_calls_have_cost(family, other_user):
+    from kuckuc.models import BudgetHold, Payer
+
+    staff_uid = family.get("/api/family/me").json()["uid"]
+    family.deps.store.put_payer(
+        Payer(id="org-1", name="Org", month_cap_usd=50, tz="Europe/Belgrade", staff_uids=[staff_uid])
+    )
+    hold = BudgetHold(episode_id="e1", payer_id="org-1", keys=[], usd=6.0, created_at=family.sys.clock.now())
+    family.deps.store.reserve_budget(hold, [("org-1:month:2026-11", 50.0)])
+    family.deps.store.settle_budget("e1", 1.5)
+    family.deps.store.reserve_budget(hold.model_copy(update={"episode_id": "e2"}), [("org-1:month:2026-11", 50.0)])
+    assert family.get("/api/family/me").json()["budgets"] == [
+        {"payer": "Org", "period": "month", "label": "2026-11", "cap_usd": 50.0, "spent_usd": 1.5, "reserved_usd": 6.0}
+    ]
+    assert other_user.get("/api/family/me").json()["budgets"] == []

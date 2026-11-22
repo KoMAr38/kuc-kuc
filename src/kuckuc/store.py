@@ -8,6 +8,8 @@ from datetime import UTC, date, datetime
 from typing import Protocol
 
 from kuckuc.models import (
+    BudgetHold,
+    Payer,
     Alert,
     Answer,
     CallRecord,
@@ -73,6 +75,26 @@ class Store(Protocol):
     def add_demo_spend(self, day: date, usd: float) -> float: ...
     def get_demo_spend(self, day: date) -> float: ...
 
+    def get_payer(self, id: str) -> Payer | None: ...
+    def put_payer(self, p: Payer) -> None: ...
+    def find_payer_by_invite(self, code: str) -> Payer | None: ...
+    def list_payers_for_staff(self, uid: str) -> list[Payer]: ...
+    def reserve_budget(self, hold: BudgetHold, caps: list[tuple[str, float]]) -> str | None:
+        """Holds ``hold.usd`` in every ``(key, cap)`` budget, all or nothing, once per episode.
+        None when held (now or by an earlier run of the same step), "budget" when it would pass a cap,
+        "busy" when the database could not settle the race in time."""
+        ...
+    def settle_budget(self, episode_id: str, spent_usd: float) -> bool:
+        """Swaps the episode's hold for what it spent, once. False when there is nothing left to settle."""
+        ...
+    def list_open_holds(self) -> list[BudgetHold]: ...
+    def get_hold(self, episode_id: str) -> BudgetHold | None: ...
+    def release_claim(self, key: str) -> None: ...
+    def get_budget(self, key: str) -> dict[str, float]: ...
+    def claim_once(self, key: str) -> bool:
+        """True for the first caller only. A claim is kept for a week."""
+        ...
+
     def stats(self) -> dict[str, int]: ...
     def put_stat_doc(self, name: str, data: dict) -> None: ...
     def get_stat_doc(self, name: str) -> dict | None: ...
@@ -102,6 +124,10 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._stat_docs: dict[str, dict] = {}
         self._placed_by_day: dict[str, int] = {}  # as Firestore counts: one per call that rang, by UTC day
+        self._payers: dict[str, Payer] = {}
+        self._budgets: dict[str, dict[str, float]] = {}
+        self._holds: dict[str, BudgetHold] = {}
+        self._claims: set[str] = set()
 
     # users
     def get_user(self, uid: str) -> User | None:
@@ -310,6 +336,67 @@ class MemoryStore:
 
     def get_demo_spend(self, day: date) -> float:
         return self._demo_spend.get(day, 0.0)
+
+    # payers and call budgets
+    def get_payer(self, id: str) -> Payer | None:
+        return _copy(self._payers.get(id))
+
+    def put_payer(self, p: Payer) -> None:
+        self._payers[p.id] = p.model_copy(deep=True)
+
+    def find_payer_by_invite(self, code: str) -> Payer | None:
+        if not code:
+            return None
+        return _copy(next((p for p in self._payers.values() if p.invite_code == code), None))
+
+    def list_payers_for_staff(self, uid: str) -> list[Payer]:
+        return [p.model_copy(deep=True) for p in self._payers.values() if uid in p.staff_uids]
+
+    def reserve_budget(self, hold: BudgetHold, caps: list[tuple[str, float]]) -> str | None:
+        with self._lock:
+            if hold.episode_id in self._holds:
+                return None
+            for key, cap in caps:
+                budget = self._budgets.get(key, {"reserved": 0.0, "spent": 0.0})
+                if budget["reserved"] + budget["spent"] + hold.usd > cap + 1e-9:
+                    return "budget"
+            for key, _ in caps:
+                budget = self._budgets.setdefault(key, {"reserved": 0.0, "spent": 0.0})
+                budget["reserved"] = round(budget["reserved"] + hold.usd, 4)
+            self._holds[hold.episode_id] = hold.model_copy(update={"keys": [key for key, _ in caps]})
+            return None
+
+    def settle_budget(self, episode_id: str, spent_usd: float) -> bool:
+        with self._lock:
+            hold = self._holds.get(episode_id)
+            if hold is None or hold.settled:
+                return False
+            for key in hold.keys:
+                budget = self._budgets[key]
+                budget["reserved"] = round(max(0.0, budget["reserved"] - hold.usd), 4)
+                budget["spent"] = round(budget["spent"] + spent_usd, 4)
+            self._holds[episode_id] = hold.model_copy(update={"settled": True})
+            return True
+
+    def list_open_holds(self) -> list[BudgetHold]:
+        return [h.model_copy(deep=True) for h in self._holds.values() if not h.settled]
+
+    def get_budget(self, key: str) -> dict[str, float]:
+        return dict(self._budgets.get(key, {"reserved": 0.0, "spent": 0.0}))
+
+    def get_hold(self, episode_id: str) -> BudgetHold | None:
+        return _copy(self._holds.get(episode_id))
+
+    def release_claim(self, key: str) -> None:
+        with self._lock:
+            self._claims.discard(key)
+
+    def claim_once(self, key: str) -> bool:
+        with self._lock:
+            if key in self._claims:
+                return False
+            self._claims.add(key)
+            return True
 
     # public counters
     def stats(self) -> dict[str, int]:

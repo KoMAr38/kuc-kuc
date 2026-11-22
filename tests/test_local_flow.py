@@ -79,7 +79,8 @@ def test_unwell_person_then_neighbour_reports_trouble_is_an_urgent_194_message(s
     assert sys.deps.store.get_episode(ep_id).result == Result.NEEDS_HELP
     last = sys.deps.notifier.sent[-1]
     assert (last.key, last.urgent) == ("needs_help_194", True)
-    assert last.params == {"name": "baba Milena", "neighbor": "Dragan", "hazard": "heat"}
+    # The test phone is a US number, so the emergency number named is 911.
+    assert last.params == {"name": "baba Milena", "neighbor": "Dragan", "hazard": "heat", "emergency": "911"}
 
 
 def test_kill_switch_between_queueing_and_dialling_stops_the_call_and_alerts_the_family(sys):

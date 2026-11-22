@@ -330,3 +330,18 @@ def test_a_refused_number_on_a_heads_up_is_reported_at_once():
 
     ep, acts = run(EpisodeKind.HEADSUP, [Due(), CallBlocked("refused")])
     assert ep.result == Result.NOT_DELIVERED and Notify("call_refused", True) in acts
+
+
+def test_a_check_with_no_money_left_tells_the_family_at_once_that_calls_are_paused():
+    for reason in ("budget", "no_budget"):
+        for kind in (EpisodeKind.CHECK, EpisodeKind.MANUAL, EpisodeKind.HEADSUP):
+            ep, acts = run(kind, [Due(), CallBlocked(reason)])
+            assert acts[-2:] == [Notify("budget_paused", True), Close(Result.BLOCKED)], (reason, kind)
+        _, acts = run(EpisodeKind.INTRO, [Due(), CallBlocked(reason)])
+        assert acts[-2:] == [Notify("intro_blocked", False), Close(Result.BLOCKED)]
+
+
+def test_outside_its_season_the_family_is_told_the_contract_is_not_in_force_not_that_money_ran_out():
+    for kind in (EpisodeKind.CHECK, EpisodeKind.HEADSUP):
+        _, acts = run(kind, [Due(), CallBlocked("off_season")])
+        assert acts[-2:] == [Notify("budget_off_season", True), Close(Result.BLOCKED)]

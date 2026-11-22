@@ -158,3 +158,34 @@ def test_a_first_try_that_fails_at_once_leaves_the_second_almost_the_whole_budge
 
     GeminiInterpreter(generate=error_then_ok, clock=lambda: now[0]).interpret(LONG, "sr", Question.WELLBEING)
     assert given[1] == MODEL_BUDGET_S - 0.5
+
+
+# Fingerprints of the Serbian and English instructions measured on real audio on 17 Nov 2026. A change
+# to any of them needs a new measurement first (see the note above _LABEL_MEANING in interpret.py).
+MEASURED = {
+    ("sr", Question.WELLBEING): "b1010974ad65189ed387bb4a92cd87c76b02614c88731017d7d6fb7d440238b3",
+    ("sr", Question.YES_NO): "1d2154f933cdc226a24cda7a199b86dc1bec1c55a889a9c2cd3fa9e12daf5f4c",
+    ("sr", Question.NEIGHBOR_REPORT): "37af7517d8ccfd32369c759c7cde7e25e74d9d40931b4012bf30160681164547",
+    ("en", Question.WELLBEING): "8a6653f54194785e8cd8997ee3cc74202fa62e0e6b6eba3dbef506404fbfe4c7",
+    ("en", Question.YES_NO): "40b6acadab08906828112fac1498a8054f99a24f222275b0e0bc65b3ca6b2b49",
+    ("en", Question.NEIGHBOR_REPORT): "f2fa8d991658eb811b78f0df23d47764ac1bba76d402b0c4a26bf11f0b800651",
+}
+
+
+@pytest.mark.parametrize("lang,question", sorted(MEASURED))
+def test_the_measured_serbian_and_english_instructions_are_unchanged(lang, question):
+    import hashlib
+
+    from kuckuc.speech.interpret import build_prompt
+
+    assert hashlib.sha256(build_prompt(lang, question).encode()).hexdigest() == MEASURED[(lang, question)]
+
+
+def test_german_calls_get_german_yes_and_no_examples():
+    from kuckuc.speech.interpret import build_prompt
+
+    yes_no = build_prompt("de", Question.YES_NO)
+    assert "German" in yes_no and '"ja"' in yes_no and '"nein"' in yes_no and '"nein, danke"' in yes_no
+    assert "Serbian" not in yes_no and '"da"' not in yes_no
+    for question in Question:
+        assert "expected to answer in German" in build_prompt("de", question)

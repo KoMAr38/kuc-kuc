@@ -57,6 +57,15 @@ class LogNotifier:
         return False
 
 
+def tts_voices(settings: Settings) -> dict[str, str]:
+    """The voice for each call language, as "<voice name>@<speaking rate>"."""
+    return {
+        "sr": f"{settings.tts_voice_sr}@{settings.tts_rate_sr}",
+        "en": f"{settings.tts_voice_en}@{settings.tts_rate_en}",
+        "de": f"{settings.tts_voice_de}@{settings.tts_rate_de}",
+    }
+
+
 def build_cloud_deps(settings: Settings, role: Literal["engine", "voice", "web", "job"]) -> Deps:
     """Real Google Cloud and Twilio edges. Each service builds only what it uses, which keeps
     cold starts short and lets every service account hold only the permissions its code needs."""
@@ -111,20 +120,21 @@ def build_cloud_deps(settings: Settings, role: Literal["engine", "voice", "web",
         from kuckuc.speech.interpret import GeminiInterpreter
         from kuckuc.speech.tts import CachedTts
 
-        voices = {
-            "sr": f"{settings.tts_voice_sr}@{settings.tts_rate_sr}",
-            "en": f"{settings.tts_voice_en}@{settings.tts_rate_en}",
-        }
-        deps.tts = CachedTts(deps.blobs, google_tts_synth(settings), voices)
+        deps.tts = CachedTts(deps.blobs, google_tts_synth(settings), tts_voices(settings))
         deps.interpreter = GeminiInterpreter(gemini_generate(settings))
     return deps
 
 
 def build_memory_deps(now: datetime | None = None) -> Deps:
+    from kuckuc.models import OWN_PAYER, Payer
+
     clock = FixedClock(now or datetime.now(UTC))
+    store = MemoryStore(now=clock.now)
+    # Locally the service's own account has money for calls, as the owner sets it in the cloud.
+    store.put_payer(Payer(id=OWN_PAYER, name="Kuc-kuc", month_cap_usd=1000.0))
     return Deps(
         settings=Settings(_env_file=None),
-        store=MemoryStore(now=clock.now),
+        store=store,
         bus=MemoryBus(),
         queue=MemoryQueue(clock),
         blobs=MemoryBlobs(),

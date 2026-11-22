@@ -23,6 +23,8 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from kuckuc.models import (
+    BudgetHold,
+    Payer,
     Alert,
     Answer,
     CallRecord,
@@ -50,11 +52,20 @@ COLLECTIONS = (
     "demo_days",
     "runtime",
     "stats",
+    "payers",
+    "budgets",
+    "budget_holds",
+    "claims",
 )
 _COUNTERS = "_counters"
 DEMO_PREFIX = "demo-"
 SIM_PREFIX = "sim-"  # the load test's simulated people and their episodes
 DEMO_DATA_KEPT = timedelta(hours=24)
+
+
+def _budget(data: dict | None) -> dict[str, float]:
+    data = data or {}
+    return {"reserved": float(data.get("reserved", 0.0)), "spent": float(data.get("spent", 0.0))}
 
 
 def _utc_now() -> datetime:
@@ -362,6 +373,101 @@ class FirestoreStore:
         # "Busy" can also hide a real failure: the last reason is written down.
         log.warning("demo reservation busy after %d tries (%s: %s)", RESERVE_ATTEMPTS, type(last).__name__, last)
         return "busy"
+
+    # payers and call budgets
+    def get_payer(self, id: str) -> Payer | None:
+        return self._get("payers", id, Payer)
+
+    def put_payer(self, p: Payer) -> None:
+        self._put("payers", p.id, p)
+
+    def find_payer_by_invite(self, code: str) -> Payer | None:
+        if not code:
+            return None
+        found = list(self._where("payers", invite_code=code).limit(1).stream())
+        return Payer.model_validate(found[0].to_dict()) if found else None
+
+    def list_payers_for_staff(self, uid: str) -> list[Payer]:
+        query = self._col("payers").where(filter=FieldFilter("staff_uids", "array_contains", uid))
+        return [Payer.model_validate(s.to_dict()) for s in query.stream()]
+
+    def reserve_budget(self, hold: BudgetHold, caps: list[tuple[str, float]]) -> str | None:
+        hold_ref = self._col("budget_holds").document(hold.episode_id)
+        refs = [(self._col("budgets").document(key), cap) for key, cap in caps]
+        stored = hold.model_copy(update={"keys": [key for key, _ in caps]})
+
+        @firestore.transactional
+        def run(transaction) -> str | None:
+            if hold_ref.get(transaction=transaction).exists:
+                return None  # this check holds its money already
+            budgets = []
+            for ref, cap in refs:
+                snap = ref.get(transaction=transaction)
+                budgets.append(_budget(snap.to_dict() if snap.exists else None))
+            for (ref, cap), budget in zip(refs, budgets, strict=True):
+                if budget["reserved"] + budget["spent"] + hold.usd > cap + 1e-9:
+                    return "budget"
+            for (ref, _), budget in zip(refs, budgets, strict=True):
+                transaction.set(ref, budget | {"reserved": round(budget["reserved"] + hold.usd, 4)})
+            transaction.set(hold_ref, stored.model_dump(mode="json"))
+            return None
+
+        # Checks of one organisation often start in the same minute and all want the same budget
+        # documents: Firestore aborts all but one of the colliding transactions. Try again after a short,
+        # random pause; "busy" sends the event back to be delivered again later, never blocks the check.
+        last: Exception | None = None
+        for attempt in range(RESERVE_ATTEMPTS):
+            try:
+                return run(self._db.transaction())
+            except (gexc.Aborted, ValueError) as exc:
+                last = exc
+                if attempt + 1 < RESERVE_ATTEMPTS:
+                    time.sleep(random.uniform(0.05, 0.3) * (attempt + 1))
+        log.warning("budget reservation busy after %d tries (%s: %s)", RESERVE_ATTEMPTS, type(last).__name__, last)
+        return "busy"
+
+    def settle_budget(self, episode_id: str, spent_usd: float) -> bool:
+        hold_ref = self._col("budget_holds").document(episode_id)
+
+        @firestore.transactional
+        def run(transaction) -> bool:
+            snap = hold_ref.get(transaction=transaction)
+            if not snap.exists:
+                return False
+            hold = BudgetHold.model_validate(snap.to_dict())
+            if hold.settled:
+                return False
+            refs = [self._col("budgets").document(key) for key in hold.keys]
+            budgets = [_budget(s.to_dict() if s.exists else None) for s in (r.get(transaction=transaction) for r in refs)]
+            for ref, budget in zip(refs, budgets, strict=True):
+                transaction.set(ref, {
+                    "reserved": round(max(0.0, budget["reserved"] - hold.usd), 4),
+                    "spent": round(budget["spent"] + spent_usd, 4),
+                })  # fmt: skip
+            transaction.update(hold_ref, {"settled": True})
+            return True
+
+        return run(self._db.transaction())
+
+    def list_open_holds(self) -> list[BudgetHold]:
+        return [BudgetHold.model_validate(s.to_dict()) for s in self._where("budget_holds", settled=False).stream()]
+
+    def get_hold(self, episode_id: str) -> BudgetHold | None:
+        return self._get("budget_holds", episode_id, BudgetHold)
+
+    def release_claim(self, key: str) -> None:
+        self._col("claims").document(key).delete()
+
+    def get_budget(self, key: str) -> dict[str, float]:
+        snap = self._col("budgets").document(key).get()
+        return _budget(snap.to_dict() if snap.exists else None)
+
+    def claim_once(self, key: str) -> bool:
+        try:
+            self._col("claims").document(key).create({"at": firestore.SERVER_TIMESTAMP, "expires_at": self._now() + timedelta(days=7)})
+        except gexc.Conflict:
+            return False
+        return True
 
     def add_demo_spend(self, day: date, usd: float) -> float:
         self._col("demo_days").document(day.isoformat()).set({"usd": firestore.Increment(usd)}, merge=True)

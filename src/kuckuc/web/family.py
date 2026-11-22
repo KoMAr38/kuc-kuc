@@ -27,7 +27,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from kuckuc.deps import Deps
 from kuckuc.engine.schedule import daytime_start
 from kuckuc.engine.notify import LINKED, NOT_LINKED
-from kuckuc.models import EpisodeKind, EpisodeState, Neighbor, Person, PersonStatus, User, finished_for_pages
+from kuckuc.budget import budget_caps
+from kuckuc.models import (
+    OWN_PAYER,
+    EpisodeKind,
+    EpisodeState,
+    Lang,
+    Neighbor,
+    PageLang,
+    Person,
+    PersonStatus,
+    User,
+    finished_for_pages,
+)
 from kuckuc.rules import hazards_for
 from kuckuc.weather import cell_of, fetch_forecast
 
@@ -81,7 +93,7 @@ class PersonIn(BaseModel):
     family_name: str = Field(min_length=1, max_length=80)  # as said to the person: "vaš unuk Petar"
     gender: Literal["f", "m"]
     phone: str
-    lang: Literal["sr", "en"]
+    lang: Lang  # the language of the calls; the page itself stays in Serbian or English
     lat: float = Field(ge=-90, le=90)
     lon: float = Field(ge=-180, le=180)
     place: str = Field(min_length=1, max_length=80)
@@ -99,7 +111,7 @@ class IntroRequest(BaseModel):
 
 
 class Language(BaseModel):
-    lang: Literal["sr", "en"]
+    lang: PageLang
 
 
 @lru_cache(maxsize=1)
@@ -224,14 +236,29 @@ def family_router(
             ],
         }
 
+    def budgets_for(user: User) -> list[dict]:
+        """What each payer this user works for has spent and holds, against each of its caps."""
+        out = []
+        for payer in deps.store.list_payers_for_staff(user.uid):
+            for key, cap in budget_caps(payer, deps.clock.now()):
+                period, label = key.split(":", 2)[1:]
+                if period == "season" and payer.season_end is not None:
+                    label = f"{label} – {payer.season_end.isoformat()}"
+                used = deps.store.get_budget(key)
+                out.append({"payer": payer.name, "period": period, "label": label, "cap_usd": cap,
+                            "spent_usd": used["spent"], "reserved_usd": used["reserved"]})  # fmt: skip
+        return out
+
     @router.get("/api/family/me")
     def me(user: User = Depends(current_user)):
         bot = deps.settings.telegram_bot_name
         link = f"https://t.me/{bot}?start={user.telegram_link_code}" if bot and user.telegram_link_code else None
         persons = deps.store.list_persons_by_owner(user.uid)  # demo and simulated people have no owner
         return {
+            "uid": user.uid,
             "email": user.email,
             "lang": user.lang,
+            "budgets": budgets_for(user),
             "telegram_linked": bool(user.telegram_chat_id),
             "telegram_link_url": link,
             "persons": [person_view(p) for p in persons],
@@ -348,7 +375,13 @@ def family_router(
 
     @router.post("/api/family/persons", status_code=201)
     def enrol(body: PersonIn, user: User = Depends(current_user)):
-        if body.invite_code not in deps.settings.invite_codes:
+        # The invite code decides who pays for the calls: an organisation's own code puts the person on
+        # its budget; the codes in the settings put them on the service's own account.
+        if body.invite_code in deps.settings.invite_codes:
+            payer_id = OWN_PAYER
+        elif (payer := deps.store.find_payer_by_invite(body.invite_code)) is not None:
+            payer_id = payer.id
+        else:
             return refused("invite", 403)
         if deps.settings.telegram_bot_name and not user.telegram_chat_id:
             # Every notice about the calls goes to Telegram; with no chat it would reach nobody.
@@ -386,6 +419,7 @@ def family_router(
             tz=tz,
             place=body.place.strip(),
             status=PersonStatus.PENDING_CONSENT,
+            payer_id=payer_id,
         )
         deps.store.put_person(person)
         neighbors = [

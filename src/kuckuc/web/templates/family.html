@@ -37,6 +37,12 @@
       <p id="telegram-state"></p>
     </div>
 
+    <div class="card" id="budget-card" hidden>
+      <h2 data-t="budget_title">Money for calls</h2>
+      <ul id="budget-list"></ul>
+      <p class="fine-print" data-t="budget_hint">A check holds its largest possible cost while it runs and is charged what its calls cost once it ends.</p>
+    </div>
+
     <h2 data-t="people_title">People</h2>
     <p id="family-message" class="demo-message" role="status" aria-live="polite"></p>
     <div id="people"></div>
@@ -58,6 +64,7 @@
           <legend data-t="f_lang">Language of the call</legend>
           <label class="inline"><input type="radio" name="lang" value="sr" checked> Srpski</label>
           <label class="inline"><input type="radio" name="lang" value="en"> English</label>
+          <label class="inline"><input type="radio" name="lang" value="de"> Deutsch</label>
         </fieldset>
         <label><span data-t="f_place">Place (village or town only, no street)</span>
           <input id="place-search" type="text" autocomplete="off" required></label>

@@ -129,7 +129,10 @@ def test_kill_switch_blocks_and_publishes(voice):
 def test_everything_the_call_might_say_is_synthesised_before_the_phone_rings(voice):
     voice.client.post("/calls/start", json={"call_id": "c1"})
     said = {text for text, lang in voice.deps.tts.spoken}
-    assert "Dobar dan, baba Milena. Ovde Kuc-kuc. Danas je veoma hladno. Zovem da proverim: jeste li dobro?" in said
+    assert (
+        "Dobar dan, baba Milena. Ovde Kuc-kuc, automatski poziv. Danas je veoma hladno. Zovem da proverim: jeste li dobro?"
+        in said
+    )
     assert "Nisam vas razumela. Recite da ili ne: jeste li dobro?" in said
     assert {
         "Hvala, baba Milena. Čuvajte se. Doviđenja.",

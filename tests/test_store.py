@@ -270,3 +270,89 @@ def test_a_call_is_created_once(store):
     assert store.create_call(make_call(id="c1")) is True
     assert store.create_call(make_call(id="c1", to="+15005550009")) is False
     assert store.get_call("c1").to != "+15005550009"
+
+
+# --- payers and their call budgets -------------------------------------------------------------
+
+
+def _hold(episode_id: str, usd: float, payer_id: str = "o1"):
+    from kuckuc.models import BudgetHold
+
+    return BudgetHold(episode_id=episode_id, payer_id=payer_id, keys=[], usd=usd, created_at=T0)
+
+
+CAPS = [("o1:month:2026-11", 10.0), ("o1:season:2026-11-01", 15.0)]
+
+
+def test_a_payer_is_found_by_its_invite_code(store):
+    from kuckuc.models import Payer
+
+    store.put_payer(Payer(id="o1", name="Org", month_cap_usd=10, invite_code="ORG-1"))
+    assert store.get_payer("o1").month_cap_usd == 10
+    assert store.find_payer_by_invite("ORG-1").id == "o1"
+    assert store.find_payer_by_invite("nope") is None and store.get_payer("o2") is None
+
+
+def test_a_check_reserves_its_worst_case_against_every_cap_once(store):
+    assert store.reserve_budget(_hold("e1", 6.0), CAPS) is None
+    assert store.reserve_budget(_hold("e1", 6.0), CAPS) is None  # the same step carried out again
+    assert store.get_budget("o1:month:2026-11") == {"reserved": 6.0, "spent": 0.0}
+    assert store.get_budget("o1:season:2026-11-01") == {"reserved": 6.0, "spent": 0.0}
+
+
+def test_a_check_that_does_not_fit_every_cap_reserves_nothing(store):
+    assert store.reserve_budget(_hold("e1", 6.0), CAPS) is None
+    assert store.reserve_budget(_hold("e2", 6.0), [("o1:month:2026-11", 20.0), CAPS[1]]) is None
+    assert store.reserve_budget(_hold("e3", 6.0), [("o1:month:2026-11", 20.0), CAPS[1]]) == "budget"
+    assert store.get_budget("o1:month:2026-11") == {"reserved": 12.0, "spent": 0.0}
+    assert [h.episode_id for h in store.list_open_holds()] == ["e1", "e2"]
+
+
+def test_settling_swaps_the_reservation_for_what_was_spent_once(store):
+    store.reserve_budget(_hold("e1", 6.0), CAPS)
+    assert store.settle_budget("e1", 1.25) is True
+    assert store.settle_budget("e1", 1.25) is False
+    assert store.get_budget("o1:month:2026-11") == {"reserved": 0.0, "spent": 1.25}
+    assert store.list_open_holds() == []
+    assert store.reserve_budget(_hold("e2", 8.7), CAPS) is None  # the money held for e1 is free again
+
+
+def test_parallel_checks_never_reserve_past_a_cap(store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(lambda i: store.reserve_budget(_hold(f"e{i}", 4.0), CAPS), range(6)))
+    # 10 dollars a month fit two checks of 4; on Firestore a collision may also be told "busy".
+    assert set(results) <= {None, "budget", "busy"} and 1 <= results.count(None) <= 2
+    assert store.get_budget("o1:month:2026-11")["reserved"] == 4.0 * results.count(None)
+
+
+def test_something_is_claimed_once(store):
+    assert store.claim_once("budget_paused:o1:2026-11-20") is True
+    assert store.claim_once("budget_paused:o1:2026-11-20") is False
+
+
+
+def test_a_staff_member_finds_the_payers_they_work_for(store):
+    from kuckuc.models import Payer
+
+    store.put_payer(Payer(id="o1", name="One", staff_uids=["s1", "s2"]))
+    store.put_payer(Payer(id="o2", name="Two", staff_uids=["s2"]))
+    assert sorted(p.id for p in store.list_payers_for_staff("s2")) == ["o1", "o2"]
+    assert [p.id for p in store.list_payers_for_staff("s1")] == ["o1"]
+    assert store.list_payers_for_staff("nobody") == []
+
+
+def test_a_payer_with_a_time_zone_that_does_not_exist_is_refused():
+    from pydantic import ValidationError
+
+    from kuckuc.models import Payer
+
+    with pytest.raises(ValidationError):
+        Payer(id="o1", name="Org", tz="Europe/Belgrad")
+
+
+def test_a_claim_can_be_given_back(store):
+    assert store.claim_once("k") is True
+    store.release_claim("k")
+    assert store.claim_once("k") is True

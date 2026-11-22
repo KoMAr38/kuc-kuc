@@ -3,7 +3,8 @@
     python -m kuckuc.dev          then open http://localhost:8080
 
 The phone is pretend: add ``?fake=ok``, ``?fake=silent`` or ``?fake=unwell`` to the address to
-choose how it answers. The verification code is always 123456, sign-in accepts any email, and
+choose how it answers. The verification code is always 123456, sign-in accepts any email
+(staff@example.com also sees the call budget), and
 the invite code comes from KUCKUC_INVITE_CODES. The clock runs faster than real time so the
 waits between calls are short. Nothing is dialled and nothing leaves this computer.
 """
@@ -19,7 +20,7 @@ from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
 
 from kuckuc.local import build_local
-from kuckuc.models import Answer, Question
+from kuckuc.models import OWN_PAYER, Answer, Payer, Question
 
 SPEED = 5  # simulated seconds per real second
 PICK_UP_AFTER_S = 3  # real seconds a pretend phone rings before it is answered
@@ -42,6 +43,10 @@ SPOKEN = {
 def create_dev_app(monotonic: Callable[[], float] = time.monotonic, now: datetime | None = None) -> FastAPI:
     """``now`` is where the pretend clock starts; by default, the real time."""
     system = build_local(now)
+    # Sign in as staff@example.com to see the call budget as a payer's staff see it.
+    system.deps.store.put_payer(
+        Payer(id=OWN_PAYER, name="Kuc-kuc (local)", month_cap_usd=1000.0, staff_uids=["local-staff@example.com"])
+    )
     app = system.web
     lock = threading.Lock()
     state = {"mode": "ok", "last": monotonic(), "ringing_since": None}

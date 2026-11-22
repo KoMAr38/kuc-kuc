@@ -6,9 +6,11 @@ from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from zoneinfo import ZoneInfo
 
-Lang = Literal["sr", "en"]
+Lang = Literal["sr", "en", "de"]  # what the phone calls speak
+PageLang = Literal["sr", "en"]  # what the family page and Telegram messages are written in
 Gender = Literal["f", "m"]
 Hazard = Literal["heat", "cold", "wind", "snow"]
 
@@ -85,7 +87,7 @@ class ScriptKind(StrEnum):
 class User(BaseModel):
     uid: str
     email: str
-    lang: Lang = "en"
+    lang: PageLang = "en"
     telegram_chat_id: str | None = None
     telegram_link_code: str | None = None
 
@@ -107,6 +109,45 @@ class Person(BaseModel):
     status: PersonStatus
     demo: bool = False
     sim: bool = False
+    payer_id: str = "own"  # who pays for the calls; people enrolled before payers existed are on "own"
+
+
+OWN_PAYER = "own"  # the service's own account: people enrolled with an invite code from the settings
+
+
+class Payer(BaseModel):
+    """Who pays for a person's calls: an organisation, or the service's own account. With season dates,
+    calls happen only inside the season. With no cap at all there is no money for calls."""
+
+    id: str
+    name: str
+    month_cap_usd: float | None = None
+    season_cap_usd: float | None = None
+    season_start: date | None = None
+    season_end: date | None = None
+    tz: str = "Europe/Belgrade"  # whose calendar month the monthly cap counts in
+    staff_uids: list[str] = Field(default_factory=list)  # see the budget, are told when it runs out
+    invite_code: str | None = None  # a family enrolling with this code puts the person on this payer
+
+    @field_validator("tz")
+    @classmethod
+    def _real_time_zone(cls, tz: str) -> str:
+        try:
+            ZoneInfo(tz)  # a mistyped zone would stop every check of this payer
+        except Exception:
+            raise ValueError(f"no time zone {tz!r}") from None
+        return tz
+
+
+class BudgetHold(BaseModel):
+    """The money a check holds from the moment its first call is queued until the watchdog settles it."""
+
+    episode_id: str
+    payer_id: str
+    keys: list[str]  # the budget periods it is held in ("o1:month:2027-07", "o1:season:2027-06-01")
+    usd: float
+    created_at: datetime
+    settled: bool = False
 
 
 class Neighbor(BaseModel):
