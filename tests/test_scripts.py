@@ -385,3 +385,8 @@ def test_german_herr_in_any_written_form_goes_into_the_case():
         him = replace(DE, name=written, gender="m")
         assert render(ScriptKind.NEIGHBOR_FOLLOWUP, "de", him).endswith("Wie geht es Herrn Weber?"), written
     assert render(ScriptKind.NEIGHBOR_FOLLOWUP, "de", replace(DE, name="Herrmann")).endswith("Wie geht es Herrmann?")
+
+
+def test_norways_ambulance_number_is_said_in_every_language():
+    for lang, words in (("sr", "sto trinaest"), ("en", "one one three"), ("de", "eins eins drei")):
+        assert words in render(ScriptKind.INTRO_PERSON, lang, replace(P, emergency="113")), lang

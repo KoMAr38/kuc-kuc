@@ -1,0 +1,57 @@
+{% extends "de/base.html" %}
+{% block title %}Datenschutz – Kuc-kuc{% endblock %}
+{% block content %}
+<section class="band">
+  <h1>Datenschutzerklärung</h1>
+
+  <h2>Verantwortlich</h2>
+  <p>{{ german.name }}, {{ german.address }}, <a href="mailto:{{ german.email }}">{{ german.email }}</a>.
+    Wenn eine Organisation Kuc-kuc für ihre Klientinnen und Klienten einsetzt, ist sie verantwortlich,
+    und wir verarbeiten die Daten in ihrem Auftrag.</p>
+
+  <h2>Welche Daten wir verarbeiten</h2>
+  <ul>
+    <li><strong>Angehörige und Mitarbeitende:</strong> E-Mail-Adresse und Kennung der Google-Anmeldung, Sprache der
+      Seite und, wenn verbunden, der Telegram-Chat für Benachrichtigungen.</li>
+    <li><strong>Die angerufene Person:</strong> der Name, so wie er im Anruf gesprochen wird, Telefonnummer, Geschlecht
+      (für die Anrede), Sprache, der Ort, auf etwa einen Kilometer gerundet, und die Antworten auf die Anrufe:
+      Aufnahme, Abschrift und Einordnung („gut“, „braucht Hilfe“ oder „unklar“).</li>
+    <li><strong>Nachbarinnen und Nachbarn:</strong> Name, Telefonnummer und ihre Antworten.</li>
+  </ul>
+  <p>Eine Straßenadresse speichern wir nie.</p>
+
+  <h2>Zwecke und Rechtsgrundlagen</h2>
+  <p>Wir rufen an, wenn gefährliches Wetter angekündigt ist, und informieren Angehörige oder Mitarbeitende über
+    jeden Schritt. Rechtsgrundlage ist der Vertrag mit der Familie oder der Organisation (Art. 6 Abs. 1 lit. b DSGVO).
+    Eine Antwort wie „Mir geht es nicht gut“ ist ein Gesundheitsdatum. Dafür holen wir im ersten Anruf die
+    ausdrückliche Einwilligung der Person selbst ein (Art. 9 Abs. 2 lit. a DSGVO). Ohne dieses „Ja“ gibt es keine
+    Anrufe. Die Einwilligung kann jederzeit widerrufen werden; eine E-Mail an uns genügt.</p>
+
+  <h2>Automatische Auswertung</h2>
+  <p>Jeder Anruf sagt zu Beginn, dass er automatisch ist. Ein Computerprogramm (Google Gemini, in der EU
+    betrieben) ordnet die gesprochene Antwort ein. Das entscheidet nur, ob jemand nachsehen soll: Im Zweifel wird
+    immer jemand gerufen, nie wird eine unklare Antwort als „gut“ gewertet.</p>
+
+  <h2>Empfänger</h2>
+  <ul>
+    <li><strong>Google Cloud</strong> (Google Cloud EMEA Ltd.): Speicherung, Sprachausgabe und Auswertung,
+      in der Region Belgien (europe-west1) bzw. in EU-Regionen.</li>
+    <li><strong>Twilio Inc.</strong> (USA): Durchführung der Telefonanrufe. Die Übermittlung in die USA stützt sich
+      auf das EU-US Data Privacy Framework, unter dem Twilio nach eigenen Angaben zertifiziert ist. Die Aufnahmen
+      löschen wir bei Twilio sofort nach dem Anruf.</li>
+    <li><strong>Telegram</strong>: Benachrichtigungen an Angehörige, die ihren Chat selbst verbunden haben.</li>
+    <li><strong>Open-Meteo</strong>: Wettervorhersage; erhält nur gerundete Koordinaten, keine Namen oder Nummern.</li>
+  </ul>
+
+  <h2>Speicherdauer</h2>
+  <p>Aufnahmen der Antworten löschen wir nach sieben Tagen. Die übrigen Daten speichern wir, solange die Person
+    angemeldet ist, und löschen sie auf Anfrage.</p>
+
+  <h2>Ihre Rechte</h2>
+  <p>Sie haben das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit
+    und Widerspruch. Eine erteilte Einwilligung können Sie jederzeit widerrufen. Außerdem haben Sie das Recht auf
+    Beschwerde bei einer Datenschutz-Aufsichtsbehörde.</p>
+
+  <p class="fine-print">Stand: November 2026.</p>
+</section>
+{% endblock %}

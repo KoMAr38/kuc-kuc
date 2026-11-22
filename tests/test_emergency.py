@@ -9,7 +9,7 @@ def test_the_emergency_number_follows_the_country_of_the_phone_not_the_language(
     assert emergency_number("+49000000") == "112"
     assert emergency_number("+43000000") == "112"
     assert emergency_number("+41000000") == "112"
-    assert emergency_number("+47000000") == "112"
+    assert emergency_number("+47000000") == "113"  # Norway: 113 is the ambulance, 112 the police
     assert emergency_number("+12025550123") == "911"
     assert emergency_number("+442079460000") == "999"
     assert emergency_number("+61491570006") == "000"

@@ -127,3 +127,41 @@ def test_pages_load_scripts_and_styles_by_a_name_that_changes_with_every_release
 
     for path, asset in (("/", "demo.js"), ("/family", "family.js"), ("/", "app.css"), ("/architecture", "app.css")):
         assert re.search(rf'/static/{re.escape(asset)}\?v=[0-9a-f]{{10}}"', web.get(path).text), (path, asset)
+
+
+# --- the German pages ------------------------------------------------------------------------------
+
+
+def _with_imprint(web):
+    s = web.deps.settings
+    s.imprint_name, s.imprint_address, s.imprint_email = "Erika Muster", "Musterweg 1, 12345 Musterstadt", "info@example.com"
+    return web
+
+
+def test_without_an_imprint_there_are_no_german_pages(web):
+    # A German site for a paid service must name who runs it (DDG section 5). Until that is set, none goes live.
+    for path in ("/de", "/de/datenschutz", "/de/impressum"):
+        assert web.get(path).status_code == 404, path
+    assert 'href="/de"' not in web.get("/").text
+
+
+def test_the_german_pages_are_in_german_and_name_who_runs_the_service(web):
+    _with_imprint(web)
+    home = web.get("/de")
+    assert home.status_code == 200 and '<html lang="de">' in home.text
+    assert "Ein Klopfen an der Tür, wenn gefährliches Wetter kommt." in home.text
+    assert "kein Notrufdienst" in home.text and "112" in home.text
+    assert "/static/sample-call-de.mp3" in home.text and "info@example.com" in home.text
+    imprint = web.get("/de/impressum").text
+    assert "Erika Muster" in imprint and "Musterweg 1, 12345 Musterstadt" in imprint and "info@example.com" in imprint
+    privacy = web.get("/de/datenschutz").text
+    for words in ("Erika Muster", "sieben Tagen", "Einwilligung", "Twilio", "Belgien", "Beschwerde"):
+        assert words in privacy, words
+    assert 'href="/de"' in web.get("/").text  # the English page points to the German one
+
+
+def test_the_german_sample_call_is_served():
+    from pathlib import Path
+
+    sample = Path(__file__).resolve().parent.parent / "src" / "kuckuc" / "web" / "static" / "sample-call-de.mp3"
+    assert sample.exists() and sample.stat().st_size > 10_000

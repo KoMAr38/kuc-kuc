@@ -83,3 +83,20 @@ def test_a_release_with_changes_not_committed_to_git_is_refused_or_named_so():
     check = script.index("git diff --quiet HEAD")
     assert script.index('TAG="$(git rev-parse') < check < script.index("gcloud builds submit")
     assert "ALLOW_DIRTY" in script and "-dirty-" in script
+
+
+def test_every_page_and_static_file_goes_into_the_package():
+    # On 22 Nov 2026 the German pages in templates/de were left out ("web/templates/*" has no
+    # subfolders), so the site served them as 500 while every local test passed.
+    import fnmatch
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    patterns = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]["kuckuc"]
+    package = root / "src" / "kuckuc"
+    for folder in ("web/templates", "web/static"):
+        for path in (package / folder).rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts:
+                relative = path.relative_to(package).as_posix()
+                assert any(fnmatch.fnmatchcase(relative, p) and relative.count("/") == p.count("/") for p in patterns), relative

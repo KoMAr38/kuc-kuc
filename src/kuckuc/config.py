@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # Sections of the site that are live: "forecast", "family", "loadtest".
     features: Annotated[set[str], NoDecode] = set()
     github_url: str = ""  # shown on the site once the repository is public
+    # Who runs the service, for the German Impressum (DDG section 5) and privacy page. The German pages exist
+    # only once all three are set.
+    imprint_name: str = ""
+    imprint_address: str = ""
+    imprint_email: str = ""
 
     # Limits that protect the person being called.
     max_person_calls_per_day: int = 6

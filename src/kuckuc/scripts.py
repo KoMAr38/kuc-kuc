@@ -86,11 +86,11 @@ _PRONOUNS = {
 # The emergency number as people say it in each language, and the words for "call it". With no number
 # we know for the person's country, plain words are said instead of a number.
 _EMERGENCY_WORDS = {
-    "sr": {"194": "sto devedeset četiri", "112": "sto dvanaest", "911": "devet jedan jedan",
+    "sr": {"194": "sto devedeset četiri", "112": "sto dvanaest", "113": "sto trinaest", "911": "devet jedan jedan",
            "999": "devet devet devet", "000": "nula nula nula"},
-    "en": {"194": "one nine four", "112": "one one two", "911": "nine one one", "999": "nine nine nine",
+    "en": {"194": "one nine four", "112": "one one two", "113": "one one three", "911": "nine one one", "999": "nine nine nine",
            "000": "triple zero"},
-    "de": {"194": "eins neun vier", "112": "eins eins zwei", "911": "neun eins eins", "999": "neun neun neun",
+    "de": {"194": "eins neun vier", "112": "eins eins zwei", "113": "eins eins drei", "911": "neun eins eins", "999": "neun neun neun",
            "000": "null null null"},
 }  # fmt: skip
 _CALL_EMERGENCY = {

@@ -6,7 +6,7 @@ import hashlib
 from collections.abc import Callable
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -94,9 +94,22 @@ def create_web_app(
             # Only a signed-in family sees the way to the family page: nobody else could sign in there.
             "signed_in": bool(request.session.get("uid")),
             "v": asset_version,
+            "german": german(),
             **extra,
         }
         return templates.TemplateResponse(request, name, context)
+
+    def german() -> dict | None:
+        """Who runs the service, for the German pages; None until all of it is set, and then there are none."""
+        s = deps.settings
+        if not (s.imprint_name and s.imprint_address and s.imprint_email):
+            return None
+        return {"name": s.imprint_name, "address": s.imprint_address, "email": s.imprint_email}
+
+    def german_page(request: Request, name: str):
+        if german() is None:
+            raise HTTPException(status_code=404)
+        return page(request, name)
 
     # Three database reads per visit: during a launch, every visitor (and every script) would pay them.
     numbers: dict = {"at": None, "stats": {}, "loadtest": None}
@@ -110,6 +123,18 @@ def create_web_app(
     @app.get("/")
     def index(request: Request):
         return page(request, "index.html")
+
+    @app.get("/de")
+    def index_de(request: Request):
+        return german_page(request, "de/index.html")
+
+    @app.get("/de/datenschutz")
+    def privacy_de(request: Request):
+        return german_page(request, "de/datenschutz.html")
+
+    @app.get("/de/impressum")
+    def imprint_de(request: Request):
+        return german_page(request, "de/impressum.html")
 
     @app.get("/family")
     def family(request: Request):

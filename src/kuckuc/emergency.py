@@ -9,12 +9,13 @@ import phonenumbers
 # Switzerland and the other European countries listed here: 112.
 _BY_COUNTRY_CODE = {
     381: "194",
+    47: "113",  # Norway: 113 is the ambulance; 112 is the police
     1: "911",
     44: "999",
     61: "000",
     **dict.fromkeys(
         (30, 31, 32, 33, 34, 351, 352, 353, 354, 356, 357, 358, 359, 36, 370, 371, 372, 385, 386, 39, 40, 41,
-         420, 421, 423, 43, 45, 46, 47, 48, 49),
+         420, 421, 423, 43, 45, 46, 48, 49),
         "112",
     ),
 }  # fmt: skip

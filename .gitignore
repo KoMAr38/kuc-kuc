@@ -11,3 +11,4 @@ samples/
 .claude/
 # Real names and places the page tests look for; never committed.
 tests/private_words.txt
+deploy/private.env

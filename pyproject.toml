@@ -37,7 +37,7 @@ dev = ["pytest>=8.0", "twilio>=9.0"]  # tests check our webhook signatures again
 where = ["src"]
 
 [tool.setuptools.package-data]
-kuckuc = ["web/templates/*", "web/static/*"]
+kuckuc = ["web/templates/*", "web/templates/de/*", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

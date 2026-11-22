@@ -1,0 +1,13 @@
+{% extends "de/base.html" %}
+{% block title %}Impressum – Kuc-kuc{% endblock %}
+{% block content %}
+<section class="band">
+  <h1>Impressum</h1>
+  <h2>Angaben gemäß § 5 DDG</h2>
+  <p>{{ german.name }}<br>{{ german.address }}</p>
+  <h2>Kontakt</h2>
+  <p>E-Mail: <a href="mailto:{{ german.email }}">{{ german.email }}</a></p>
+  <h2>Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</h2>
+  <p>{{ german.name }}, Anschrift wie oben.</p>
+</section>
+{% endblock %}

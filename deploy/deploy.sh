@@ -23,6 +23,13 @@ if [ -f deploy/live.env ]; then
   source deploy/live.env
   set +a
 fi
+# Settings that are public on the site but kept out of the public repository: the owner's name, address
+# and email for the German Impressum (KUCKUC_IMPRINT_NAME, _ADDRESS, _EMAIL). The file is git-ignored.
+if [ -f deploy/private.env ]; then
+  set -a
+  source deploy/private.env
+  set +a
+fi
 
 SERVICES="${SERVICES:-voice engine web forecast-scan watchdog loadtest telegram-webhook}"
 
@@ -69,7 +76,7 @@ ENV="^|^KUCKUC_PROJECT=$PROJECT|KUCKUC_REGION=$REGION|KUCKUC_BUCKET=$BUCKET"
 ENV="$ENV|KUCKUC_VOICE_PUBLIC_URL=$VOICE_URL|KUCKUC_ENGINE_URL=$ENGINE_URL|KUCKUC_WEB_PUBLIC_URL=$WEB_URL"
 ENV="$ENV|KUCKUC_INVOKER_EMAIL=$INVOKER_SA|KUCKUC_FEATURES=${KUCKUC_FEATURES:-[]}"
 for name in GEMINI_MODEL GEMINI_LOCATION GEMINI_THINKING_LEVEL TTS_VOICE_SR TTS_VOICE_EN TTS_VOICE_DE TTS_RATE_SR TTS_RATE_DE GITHUB_URL \
-  GOOGLE_OAUTH_CLIENT_ID TELEGRAM_BOT_NAME; do
+  GOOGLE_OAUTH_CLIENT_ID TELEGRAM_BOT_NAME IMPRINT_NAME IMPRINT_ADDRESS IMPRINT_EMAIL; do
   value="$(printenv "KUCKUC_$name" || true)"
   [ -n "$value" ] && ENV="$ENV|KUCKUC_$name=$value"
 done

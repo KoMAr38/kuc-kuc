@@ -1,0 +1,78 @@
+{% extends "de/base.html" %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">„Kuc-kuc“ ist Serbisch für „Klopf, klopf“</p>
+  <h1>Ein Klopfen an der Tür, wenn gefährliches Wetter kommt.</h1>
+  <p class="lede">
+    Wenn Hitze, strenger Frost, Sturm oder starker Schneefall angekündigt ist, ruft Kuc-kuc ältere Menschen an,
+    die allein leben, und fragt: „Geht es Ihnen gut?“ Wer nicht abnimmt oder sagt, dass es ihm nicht gut geht,
+    bekommt Besuch: Kuc-kuc ruft eine Nachbarin oder einen Nachbarn an und bittet, an der Tür zu klopfen.
+  </p>
+  <p class="lede">
+    Für Städte, Gesundheitsämter und Hausnotrufdienste übernimmt Kuc-kuc die erste Runde der Anrufe an heißen
+    und kalten Tagen. Ihre Mitarbeitenden rufen nur noch dort an, wo etwas nicht stimmt, und sehen jeden Schritt.
+  </p>
+  <p class="actions">
+    <a class="button" href="#hoerprobe">Einen Anruf anhören</a>
+    <a class="quiet-link" href="#so">So funktioniert es</a>
+  </p>
+</section>
+
+<section id="so" class="band" aria-labelledby="so-title">
+  <h2 id="so-title">So funktioniert es</h2>
+  <ol class="steps">
+    <li>
+      <h3>Die Vorhersage überschreitet eine Schwelle</h3>
+      <p>Alle drei Stunden wird die Vorhersage für den Wohnort geprüft, zum Beispiel: gefühlt 35 °C oder mehr,
+        Frost von −10 °C oder kälter, Böen über 80 km/h oder 20 cm Neuschnee an einem Tag.
+        Die Schwellen stimmen wir mit Ihnen ab.</p>
+    </li>
+    <li>
+      <h3>Das Telefon klingelt</h3>
+      <p>Eine ruhige Stimme sagt auf Deutsch, was kommt, und fragt, ob alles in Ordnung ist. Die Person antwortet
+        einfach laut: kein Smartphone, keine App, keine Tasten. Jeder Anruf sagt zu Beginn, dass er automatisch ist.</p>
+    </li>
+    <li>
+      <h3>Jemand klopft an</h3>
+      <p>Keine Antwort nach drei Versuchen, eine unklare Antwort oder „Mir geht es nicht gut“: Dann klingelt das
+        Telefon der Nachbarin oder des Nachbarn. Zwanzig Minuten später fragt Kuc-kuc nach, wie es der Person geht.
+        Bei jedem Schritt geht eine Nachricht an die Angehörigen oder an Ihre Mitarbeitenden.</p>
+    </li>
+  </ol>
+  <p class="principle">Eine Regel entscheidet alles: <strong>Jeder Zweifel zählt als Problem.</strong>
+    Stille, eine falsche Nummer, ein fehlgeschlagener Anruf oder eine unklare Antwort werden nie zu „alles in Ordnung“.</p>
+</section>
+
+<section id="hoerprobe" class="demo" aria-labelledby="hoerprobe-title">
+  <h2 id="hoerprobe-title">So klingt ein Anruf</h2>
+  <p>Der Anfang eines Anrufs an einem heißen Tag, mit einem erfundenen Namen:</p>
+  <audio controls preload="none" src="/static/sample-call-de.mp3"></audio>
+</section>
+
+<section id="organisationen" class="band" aria-labelledby="org-title">
+  <h2 id="org-title">Für Städte, Gesundheitsämter und Hausnotrufdienste</h2>
+  <ul>
+    <li><strong>Die erste Anrufrunde läuft von selbst.</strong> Sobald eine Warnung kommt, ruft Kuc-kuc alle
+      angemeldeten Menschen an und meldet nur die, die Hilfe brauchen oder nicht erreichbar sind.</li>
+    <li><strong>Jeder Schritt ist sichtbar.</strong> Ihre Mitarbeitenden sehen, wer angerufen wurde, was die
+      Person gesagt hat und wer an der Tür war.</li>
+    <li><strong>Eine feste Kostengrenze.</strong> Für jede Organisation gilt ein Budget pro Monat oder Saison.
+      Eine neue Prüfung beginnt nur, wenn das Budget reicht, und eine begonnene läuft immer bis zum Ende.</li>
+    <li><strong>Jedes Telefon genügt.</strong> Festnetz oder Handy, ohne Gerät in der Wohnung.</li>
+    <li><strong>Die Einwilligung gibt die Person selbst</strong>, im ersten Anruf. Ohne ihr „Ja“ gibt es keine Anrufe.</li>
+  </ul>
+</section>
+
+<section id="kontakt" class="band closing" aria-labelledby="kontakt-title">
+  <h2 id="kontakt-title">Pilot im Sommer 2027</h2>
+  <p>
+    Wir suchen eine Stadt oder einen Hausnotrufdienst für einen bezahlten Pilotversuch im Sommer 2027.
+    Schreiben Sie uns: <a href="mailto:{{ german.email }}">{{ german.email }}</a>.
+  </p>
+  <p>
+    Die Daten liegen in der EU (Google Cloud, Belgien). Aufnahmen der Antworten werden nach sieben Tagen gelöscht.
+    Mehr dazu in der <a href="/de/datenschutz">Datenschutzerklärung</a>.
+    <strong>Kuc-kuc ist kein Notrufdienst.</strong>
+  </p>
+</section>
+{% endblock %}
